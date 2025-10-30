@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+*.pyo
+*.spec
+*.log
+*.tmp
+build/
+dist/
+logs/
+release/
+bin_push/

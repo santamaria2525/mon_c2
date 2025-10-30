@@ -1,0 +1,32 @@
+{
+  "nox_device_count": 8,
+  "use_independent_processing": true,
+  "__comment_flags": "【セレクトメニュー処理フラグ】下記の順番で実行される",
+  "__comment_details": "【on_check】1:ノマクエ、2:覇者済み、3:守護獣所持、【on_que】1:オーブカウンターイベクエ、2:守護獣クエ",
+  "__comment_event": "【on_event】1:未使用、2:爆獲れルーレット、3:フレンド招待2人確認",
+  "__comment_order": "実行順序: on_check → on_event → on_que → on_medal → on_initial → on_mission → on_name → on_gacha → on_sell → on_count → on_save",
+  "on_que": 1,
+  "on_event": 3,
+  "on_medal": 0,
+  "on_mission": 0,
+  "on_sell": 0,
+  "on_initial": 0,
+  "on_name": 0,
+  "on_gacha": 0,
+  "on_check": 0,
+  "on_count": 0,
+  "on_save": 0,
+  "name_prefix": "a",
+  "on_gacha_kaisu": 30,
+  "gacha_limit": 0,
+  "continue_until_character": false,
+  "room_key1": "617",
+  "room_key2": "618",
+  "quest": {
+    "preset": "default",
+    "parameters": {
+      "quest_id": "event_default",
+      "difficulty": "normal"
+    }
+  }
+}
