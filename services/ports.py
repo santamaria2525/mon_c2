@@ -7,7 +7,7 @@ from typing import List, Tuple
 
 from logging_util import logger
 
-from mon_c2.services.config import ConfigService
+from .config import ConfigService
 
 
 class PortAllocationService:

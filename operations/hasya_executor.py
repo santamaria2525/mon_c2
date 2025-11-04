@@ -1,7 +1,5 @@
-# -*- coding: utf-8 -*-
-"""
-Hasya (覇者) two-set workflow executor.
-"""
+﻿# -*- coding: utf-8 -*-
+"""Hasya (覇者) two-set workflow executor."""
 
 from __future__ import annotations
 
@@ -21,7 +19,7 @@ from utils.gui_dialogs import multi_press_enhanced
 from utils.set_processing import find_next_set_folders
 from monst.image import tap_if_found_on_windows
 
-from mon_c2.services import MultiDeviceService
+from services import MultiDeviceService
 
 from device_operations import continue_hasya_with_base_folder
 
@@ -29,7 +27,7 @@ _MAX_WORKERS = 4
 
 
 class HasyaExecutor:
-    """Execute the legacy覇者二セットを安全に移植したワークフロー."""
+    """Execute the legacy Hasya two-set workflow with modern guards."""
 
     def __init__(
         self,
@@ -45,28 +43,28 @@ class HasyaExecutor:
         device_count = len(ports)
 
         while True:
-            logger.info("覇者二セット開始: フォルダ%03d / ポート%s", current_base, ports)
+            logger.info("Hasya workflow start base=%03d ports=%s", current_base, ports)
             self._prepare_memory()
 
             if not self._write_bin(current_base, ports):
-                logger.warning("初期BINが不足しています。覇者処理を終了します。")
+                logger.warning("初期BINが不足しているため Hasya 処理を終了します。")
                 self._restore_memory_defaults()
                 break
             self._run_set(current_base, ports, set_number=1)
 
             second_base = current_base + device_count
             if not self._write_bin(second_base, ports):
-                logger.warning("2セット目のBINが不足しています。覇者処理を終了します。")
+                logger.warning("2セット目のBINが不足しているため Hasya 処理を終了します。")
                 self._restore_memory_defaults()
                 break
             self._run_set(second_base, ports, set_number=2)
 
             self._restore_memory_defaults()
-            logger.info("覇者二セット完了: フォルダ%03d-%03d", current_base, second_base)
+            logger.info("Hasya workflow finished base=%03d-%03d", current_base, second_base)
 
             next_idx, next_folders = find_next_set_folders(second_base + device_count, device_count)
             if not next_folders or len(next_folders) < device_count:
-                logger.info("次のフォルダセットが見つからないため覇者処理を終了します。")
+                logger.info("次のフォルダセットが見つからないため終了します。")
                 break
 
             try:
@@ -75,48 +73,48 @@ class HasyaExecutor:
                 logger.warning("次フォルダの解析に失敗しました: %s", next_folders)
                 break
 
-        logger.info("覇者処理を終了しました。")
+        logger.info("Hasya workflow complete。")
 
     # ------------------------------------------------------------------ #
     # Core steps
     # ------------------------------------------------------------------ #
     def _run_set(self, set_base: int, ports: Sequence[str], *, set_number: int) -> None:
-        logger.debug("覇者セット%d: base=%03d", set_number, set_base)
+        logger.debug("Hasya set %d: base=%03d", set_number, set_base)
         folders = [f"{set_base + idx:03d}" for idx, _ in enumerate(ports)]
 
-        # 1) ログイン & 覇者準備
+        # 1) Login & preparation
         self._run_parallel(
             ports,
             lambda port, folder, ml: device_operation_hasya(port, folder, ml),
             folders=folders,
-            name=f"覇者{set_number}セット準備",
+            name=f"Hasya set {set_number} preparation",
         )
 
-        # 2) Windowsマクロ起動
+        # 2) Windows macro kick-off
         continue_hasya_with_base_folder(set_base)
         self._press_macro_keys()
 
-        # 3) ホスト待機・完了確認
+        # 3) Host / sub confirmation
         host_ports, sub_ports = self._split_host_sub_ports(ports)
         if host_ports:
             self._run_parallel(
                 host_ports,
                 lambda port, ml: device_operation_hasya_wait(port, ml),
-                name=f"覇者{set_number}セットホスト待機",
+                name=f"Hasya set {set_number} host wait",
             )
 
         if sub_ports:
             self._run_parallel(
                 sub_ports,
                 lambda port, ml: device_operation_hasya_fin(port, ml),
-                name=f"覇者{set_number}セットサブ確認",
+                name=f"Hasya set {set_number} sub confirmation",
             )
 
         if host_ports:
             self._run_parallel(
                 host_ports,
                 lambda port, ml: device_operation_hasya_host_fin(port, ml),
-                name=f"覇者{set_number}セットホスト確認",
+                name=f"Hasya set {set_number} host confirmation",
             )
 
         self._perform_macro_cleanup(len(ports))
@@ -152,7 +150,7 @@ class HasyaExecutor:
                     result = future.result()
                     logger.debug("%s: %s => %s", name, port, result)
                 except Exception as exc:
-                    logger.error("%s: %s 実行中に例外: %s", name, port, exc)
+                    logger.error("%s: %s 実行中に例外が発生しました: %s", name, port, exc)
 
         ml.summarize_results(name)
 
@@ -177,17 +175,19 @@ class HasyaExecutor:
         try:
             next_base, used_folders = self.multi_device_service.run_push(base_folder, ports)
             if not used_folders:
-                logger.warning("覇者bin書き込み対象が見つかりません: %03d", base_folder)
+                logger.warning("Hasya BIN 書き込み対象が見つかりません: %03d", base_folder)
                 return False
             if len(used_folders) < len(ports):
-                logger.warning("覇者bin書き込み: %d端末中 %d 件のみ検出", len(ports), len(used_folders))
+                logger.warning(
+                    "Hasya BIN 書き込み: %d 台中 %d 台のみ成功", len(ports), len(used_folders)
+                )
             logger.debug(
-                "覇者bin書き込み: %03d-%03d",
+                "Hasya BIN 書き込み範囲: %03d-%03d",
                 base_folder,
                 base_folder + len(used_folders) - 1,
             )
         except Exception as exc:
-            logger.error("覇者bin書き込み失敗: %s", exc)
+            logger.error("Hasya BIN 書き込み失敗: %s", exc)
             return False
         time.sleep(3)
         return True
@@ -205,7 +205,7 @@ class HasyaExecutor:
         try:
             multi_press_enhanced()
         except Exception as exc:
-            logger.debug("multi_press_enhanced 実行失敗: %s", exc)
+            logger.debug("multi_press_enhanced 実行中に例外: %s", exc)
 
     def _perform_macro_cleanup(self, device_count: int) -> None:
         try:
@@ -217,7 +217,7 @@ class HasyaExecutor:
                 tap_if_found_on_windows("tap", "macro_fin.png", "macro")
                 time.sleep(2)
         except Exception as exc:
-            logger.debug("マクロ後処理で例外: %s", exc)
+            logger.debug("マクロクリーンアップ中に例外: %s", exc)
 
 
 __all__ = ["HasyaExecutor"]

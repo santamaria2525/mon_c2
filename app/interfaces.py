@@ -12,8 +12,11 @@ from typing import List
 
 from logging_util import logger
 
-from mon_c2.app.menu_map import build_menu
-from mon_c2.operations import OperationsFacade
+from app.menu_map import build_menu
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from operations import OperationsFacade
 
 
 class CLIInterface:
@@ -21,6 +24,8 @@ class CLIInterface:
 
     def __init__(self, core):
         self.core = core
+        from operations import OperationsFacade  # Lazy import to avoid circular deps
+
         self.operations = OperationsFacade(core)
 
     # ------------------------------------------------------------------ #
@@ -105,6 +110,8 @@ class GUIInterface:
 
     def __init__(self, core):
         self.core = core
+        from operations import OperationsFacade  # Lazy import to avoid circular deps
+
         self.operations = OperationsFacade(core)
 
     def show_main_menu(self) -> None:

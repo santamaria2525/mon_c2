@@ -6,7 +6,7 @@ from __future__ import annotations
 from typing import List, Optional, Tuple
 
 from logging_util import logger
-from mon_c2.services.config import ConfigService
+from .config import ConfigService
 
 try:
     from folder_progression_system import FolderProgressionSystem, ensure_continuous_processing, find_next_set_folders

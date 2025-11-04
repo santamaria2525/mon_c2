@@ -14,11 +14,11 @@ from loop_protection import loop_protection  # type: ignore
 from monst.adb import perform_action
 from monst.image import find_image_on_device
 
-from mon_c2.domain import LoginWorkflow
-from mon_c2.operations.friend_flow import verify_friend_status
-from mon_c2.services import ConfigService, MultiDeviceService
-from mon_c2.services.folder import FolderProgressionService
-from mon_c2.services.ports import PortAllocationService
+from domain import LoginWorkflow
+from .friend_flow import verify_friend_status
+from services import ConfigService, MultiDeviceService
+from services.folder import FolderProgressionService
+from services.ports import PortAllocationService
 
 
 class FriendRegistrationExecutor:

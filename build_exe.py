@@ -29,8 +29,9 @@ RELEASE_DIR = PROJECT_ROOT / "release"
 EXECUTABLE_NAME = "MS_Tools_C2"
 PYINSTALLER_CMD = [sys.executable, "-m", "PyInstaller"]
 
-RESOURCE_DIRS = ["gazo", "gazo_backup", "bin_push"]
-RESOURCE_FILES = ["config.json"]
+# EXE のみを出力するため追加リソースはコピーしない
+RESOURCE_DIRS: list[str] = []
+RESOURCE_FILES: list[str] = []
 
 HIDDEN_IMPORTS = [
     "logging_util",
@@ -61,6 +62,12 @@ HIDDEN_IMPORTS = [
     "tools.monitoring.standalone_task_monitor",
     "tools.monitoring.task_monitor_standalone",
     "tools.monitoring.task_monitor_standalone_exe",
+    "mon_c2",
+    "mon_c2.app",
+    "mon_c2.domain",
+    "mon_c2.operations",
+    "mon_c2.services",
+    "mon_c2.config",
 ]
 
 COLLECT_ALL_MODULES = [
@@ -70,6 +77,7 @@ COLLECT_ALL_MODULES = [
     "monst.device",
     "monst.image",
     "tools.monitoring",
+    "mon_c2",
 ]
 
 def _collect_utils_hidden_imports() -> list[str]:
@@ -163,7 +171,7 @@ def build_executable() -> Path:
 
 
 def copy_resources(built_exe: Path) -> Path:
-    _print_stage("Preparing release directory")
+    _print_stage("Preparing release directory (exe only)")
     if RELEASE_DIR.exists():
         shutil.rmtree(RELEASE_DIR)
     RELEASE_DIR.mkdir(parents=True, exist_ok=True)
@@ -171,22 +179,6 @@ def copy_resources(built_exe: Path) -> Path:
     target_exe = RELEASE_DIR / built_exe.name
     shutil.copy2(built_exe, target_exe)
 
-    for folder_name in RESOURCE_DIRS:
-        src = PROJECT_ROOT / folder_name
-        dst = RELEASE_DIR / folder_name
-        if not src.exists():
-            print(f"[WARN] Resource folder missing: {src}")
-            continue
-        shutil.copytree(src, dst, dirs_exist_ok=True)
-
-    for file_name in RESOURCE_FILES:
-        src_file = PROJECT_ROOT / file_name
-        if not src_file.exists():
-            print(f"[WARN] Resource file missing: {src_file}")
-            continue
-        shutil.copy2(src_file, RELEASE_DIR / file_name)
-
-    (RELEASE_DIR / "logs").mkdir(exist_ok=True)
     return target_exe
 
 
@@ -201,7 +193,7 @@ def main() -> None:
     print("Release directory contents:")
     for path in sorted(RELEASE_DIR.iterdir()):
         print("  -", path.name)
-    print("\n次の手順: release フォルダごと任意の場所に配置すれば単体で動作します。")
+    print("\nrelease フォルダには exe のみを配置しています。追加リソースは含まれていません。")
 
 
 if __name__ == "__main__":

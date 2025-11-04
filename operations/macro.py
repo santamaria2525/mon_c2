@@ -9,7 +9,7 @@ from logging_util import logger
 from missing_functions import load_macro
 from utils import display_message, get_target_folder
 
-from mon_c2.operations.helpers import cleanup_macro_windows
+from .helpers import cleanup_macro_windows
 
 
 class MacroRunner:

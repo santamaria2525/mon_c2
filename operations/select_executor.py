@@ -22,8 +22,8 @@ from monst.device.operations import medal_change, mission_get, mon_initial, mon_
 from monst.image.device_management import monitor_device_health
 from utils.device_utils import get_terminal_number
 
-from mon_c2.domain import LoginWorkflow
-from mon_c2.operations.select_flow import SelectResult, build_default_workflow
+from domain import LoginWorkflow
+from .select_flow import SelectResult, build_default_workflow
 
 
 @dataclass

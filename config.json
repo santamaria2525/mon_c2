@@ -1,5 +1,5 @@
 {
-  "nox_device_count": 8,
+  "nox_device_count": 4,
   "use_independent_processing": true,
   "__comment_flags": "【セレクトメニュー処理フラグ】下記の順番で実行される",
   "__comment_details": "【on_check】1:ノマクエ、2:覇者済み、3:守護獣所持、【on_que】1:オーブカウンターイベクエ、2:守護獣クエ",

@@ -1,9 +1,8 @@
-# -*- coding: utf-8 -*-
-"""Single-device operations (write / reset / save) without legacy dependencies."""
+﻿# -*- coding: utf-8 -*-
+"""Single-device operations (write / reset / save)."""
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Optional, Sequence
 
@@ -19,12 +18,12 @@ from app_crash_recovery import check_app_crash, ensure_app_running
 from logging_util import logger
 from utils import display_message, get_base_path, get_resource_path
 
-from mon_c2.domain import LoginWorkflow
-from mon_c2.services import ConfigService
+from domain import LoginWorkflow
+from services import ConfigService
 
 
 class SingleDeviceExecutor:
-    """Reimplementation of single-device helper menus."""
+    """Operations that target a single device."""
 
     def __init__(self, core, config_service: ConfigService) -> None:
         self.core = core
@@ -45,13 +44,13 @@ class SingleDeviceExecutor:
         folder_str = f"{folder:03d}"
 
         src = get_resource_path(f"{folder_str}/data10.bin", "bin_push")
-        if src is None or not Path(src).exists():
-            message = f"フォルダ{folder_str}のdata10.binが見つかりません"
+        if not src or not Path(src).exists():
+            message = f"フォルダ{folder_str}のdata10.binが見つかりません。"
             logger.error(message)
             display_message("エラー", message)
             return
 
-        logger.info("シングル書き込み開始: port=%s folder=%s", port, folder_str)
+        logger.info("シングル書き込み開始 port=%s folder=%s", port, folder_str)
 
         reset_adb_server()
         close_monster_strike_app(port)
@@ -66,24 +65,24 @@ class SingleDeviceExecutor:
 
         success = self.login_workflow.execute(port, folder_str)
         if not success:
-            logger.warning("シングル書き込み: ログインに失敗 (port=%s)", port)
+            logger.warning("シングル書き込み: ログインに失敗しました (port=%s)", port)
 
         if check_app_crash(port):
-            logger.warning("シングル書き込み: クラッシュ履歴を検出 (port=%s)", port)
+            logger.warning("シングル書き込み: クラッシュ履歴を検出しました (port=%s)", port)
 
-        logger.info("シングル書き込み完了: port=%s folder=%s", port, folder_str)
+        logger.info("シングル書き込み完了 port=%s folder=%s", port, folder_str)
 
     def initialize(self) -> None:
         port = self._resolve_port()
         if not port:
             return
 
-        logger.info("シングル初期化開始: port=%s", port)
+        logger.info("シングル初期化開始 port=%s", port)
         reset_adb_server()
         close_monster_strike_app(port)
         remove_data10_bin_from_nox(port)
         start_monster_strike_app(port)
-        logger.info("シングル初期化完了: port=%s", port)
+        logger.info("シングル初期化完了 port=%s", port)
 
     def save(self) -> None:
         port = self._resolve_port()
@@ -95,7 +94,7 @@ class SingleDeviceExecutor:
             return
 
         reset_adb_server()
-        logger.info("シングル保存開始: port=%s -> %s", port, save_folder)
+        logger.info("シングル保存開始 port=%s -> %s", port, save_folder)
 
         save_dir = Path(get_base_path()) / "bin_pull" / save_folder
         save_dir.mkdir(parents=True, exist_ok=True)
@@ -105,11 +104,11 @@ class SingleDeviceExecutor:
 
         if not success or not save_file.exists() or save_file.stat().st_size == 0:
             message = "データの保存に失敗しました。"
-            logger.error("シングル保存失敗: port=%s folder=%s", port, save_folder)
+            logger.error("シングル保存失敗 port=%s folder=%s", port, save_folder)
             display_message("エラー", message)
             return
 
-        logger.info("シングル保存完了: %s", save_file)
+        logger.info("シングル保存完了 %s", save_file)
 
     # ------------------------------------------------------------------ #
     # Helpers
@@ -124,15 +123,16 @@ class SingleDeviceExecutor:
 
         available_ports = self._available_ports()
         if not available_ports:
-            logger.error("利用可能なポートが検出できませんでした。")
+            logger.error("利用可能なポートが見つかりませんでした。")
             return None
 
-        print("\n-- デバイスポートを選択してください --")
+        print("\n-- 使用するデバイスポートを選択してください --")
         for idx, candidate in enumerate(available_ports, 1):
             print(f"  {idx}. {candidate}")
 
         while True:
-            choice = input(f"ポート番号を入力 (1-{len(available_ports)}, 0=キャンセル, 空=1番目): ").strip()
+            prompt = f"ポート番号を入力 (1-{len(available_ports)}, 0=キャンセル, 空=1番目): "
+            choice = input(prompt).strip()
             if choice == "0":
                 return None
             if choice == "":
@@ -159,12 +159,12 @@ class SingleDeviceExecutor:
                 raise ValueError
             return value
         except ValueError:
-            logger.error("無効なフォルダ番号: %s", folder)
+            logger.error("無効なフォルダ番号が指定されました: %s", folder)
             display_message("エラー", "フォルダ番号は正の整数で入力してください。")
             return None
 
     def _resolve_save_folder(self) -> Optional[str]:
-        folder = None
+        folder: Optional[str] = None
         try:
             folder = self.core.get_start_folder()
         except Exception:
@@ -174,16 +174,15 @@ class SingleDeviceExecutor:
             folder = str(folder).strip()
 
         while not folder:
-            print("\n-- 保存先フォルダ名を入力してください --")
+            print("\n-- 保存先のフォルダ名を入力してください --")
             folder = input("フォルダ名 (空=single, 0=キャンセル): ").strip()
             if folder == "0":
                 return None
             if folder == "":
                 folder = "single"
             if any(ch in folder for ch in '<>:"/\\|?*'):
-                print("無効な文字が含まれています。")
+                print("使用できない文字が含まれています。")
                 folder = None
-                continue
         return folder
 
 

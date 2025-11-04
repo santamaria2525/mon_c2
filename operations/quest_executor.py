@@ -17,7 +17,7 @@ from monst.image.device_control import tap_until_found
 from monst.image.device_management import monitor_device_health
 from utils.device_utils import get_terminal_number
 
-from mon_c2.domain import LoginWorkflow
+from domain import LoginWorkflow
 
 
 class QuestExecutor:

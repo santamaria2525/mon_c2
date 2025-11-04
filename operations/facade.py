@@ -10,13 +10,14 @@ from logging_util import logger
 
 from app.operations.manager import OperationsManager as LegacyOperationsManager
 
-from mon_c2.domain import LoginWorkflow
+from domain import LoginWorkflow
 from . import loops
-from mon_c2.operations.macro import MacroRunner
-from mon_c2.operations.single_executor import SingleDeviceExecutor
-from mon_c2.operations.account_backup_executor import AccountBackupExecutor
-from mon_c2.operations.friend_registration_executor import FriendRegistrationExecutor
-from mon_c2.services import ConfigService, MultiDeviceService
+from .macro import MacroRunner
+from .single_executor import SingleDeviceExecutor
+from .account_backup_executor import AccountBackupExecutor
+from .friend_registration_executor import FriendRegistrationExecutor
+from .shitei_click_executor import ShiteiClickExecutor
+from services import ConfigService, MultiDeviceService
 
 
 class OperationsFacade:
@@ -73,6 +74,7 @@ class OperationsFacade:
             self.multi_device_service,
             self.login_workflow,
         )
+        self.shitei_click_executor = ShiteiClickExecutor(core, self.config_service)
 
     # ------------------------------------------------------------------ #
     # Port logging helper
@@ -130,6 +132,9 @@ class OperationsFacade:
 
     def run_account_backup(self) -> None:
         self.account_backup_executor.run()
+
+    def run_shitei_click(self) -> None:
+        self.shitei_click_executor.run()
 
     # ------------------------------------------------------------------ #
     # Legacy bridge

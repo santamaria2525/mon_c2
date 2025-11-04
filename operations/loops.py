@@ -11,13 +11,13 @@ import config as legacy_config  # type: ignore
 
 from adb_utils import reset_adb_server
 from logging_util import MultiDeviceLogger, logger
-from utils import close_nox_error_dialogs, display_message, get_target_folder
+from utils import close_adb_error_dialogs, close_nox_error_dialogs, display_message, get_target_folder
 
-from mon_c2.config import MAX_FOLDER_LIMIT
-from mon_c2.domain import LoginWorkflow
-from mon_c2.operations.helpers import apply_select_configuration, cleanup_macro_windows
-from mon_c2.operations.quest_executor import QuestExecutor
-from mon_c2.services import ConfigService, ConfigSnapshot, MultiDeviceService
+from config import MAX_FOLDER_LIMIT
+from domain import LoginWorkflow
+from .helpers import apply_select_configuration, cleanup_macro_windows
+from .quest_executor import QuestExecutor
+from services import ConfigService, ConfigSnapshot, MultiDeviceService
 
 PortsResolvedCallback = Callable[[int, Sequence[str]], None]
 
@@ -121,6 +121,11 @@ class LoginLoopRunner(_BaseLoop):
             close_nox_error_dialogs()
         except Exception as exc:  # pragma: no cover - best effort cleanup
             logger.debug("Failed to close NOX error dialogs: %s", exc)
+
+        try:
+            close_adb_error_dialogs()
+        except Exception as exc:  # pragma: no cover - best effort cleanup
+            logger.debug("Failed to close adb error dialogs: %s", exc)
 
         logger.debug("Login loop start: folder %03d / ports %s", base_folder, ports)
         reset_adb_server()
@@ -276,7 +281,7 @@ class HasyaTwoSetRunner(_BaseLoop):
             multi_device_service,
             on_ports_resolved=on_ports_resolved,
         )
-        from mon_c2.operations.hasya_executor import HasyaExecutor
+        from .hasya_executor import HasyaExecutor
 
         self._executor = HasyaExecutor(multi_device_service)
 
@@ -344,7 +349,7 @@ class SelectLoopRunner(_BaseLoop):
             multi_device_service,
             on_ports_resolved=on_ports_resolved,
         )
-        from mon_c2.operations.select_executor import SelectExecutor
+        from .select_executor import SelectExecutor
 
         self._executor = SelectExecutor(login_workflow)
 
@@ -382,6 +387,11 @@ class SelectLoopRunner(_BaseLoop):
             close_nox_error_dialogs()
         except Exception as exc:  # pragma: no cover
             logger.debug("Failed to close NOX error dialogs: %s", exc)
+
+        try:
+            close_adb_error_dialogs()
+        except Exception as exc:  # pragma: no cover
+            logger.debug("Failed to close adb error dialogs: %s", exc)
 
         reset_adb_server()
 
@@ -467,6 +477,11 @@ class QuestLoopRunner(_BaseLoop):
             close_nox_error_dialogs()
         except Exception as exc:  # pragma: no cover
             logger.debug("Failed to close NOX error dialogs: %s", exc)
+
+        try:
+            close_adb_error_dialogs()
+        except Exception as exc:  # pragma: no cover
+            logger.debug("Failed to close adb error dialogs: %s", exc)
 
         reset_adb_server()
 

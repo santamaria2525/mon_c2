@@ -1,7 +1,5 @@
-# -*- coding: utf-8 -*-
-"""
-Excel ベースのアカウントバックアップをレガシーに頼らず実行するためのモジュール。
-"""
+﻿# -*- coding: utf-8 -*-
+"""Excel-driven account backup executor."""
 
 from __future__ import annotations
 
@@ -16,12 +14,12 @@ from adb_utils import reset_adb_server
 from logging_util import MultiDeviceLogger, logger
 from utils import display_message, get_target_folder
 
-from mon_c2.services import ConfigService, MultiDeviceService
+from services import ConfigService, MultiDeviceService
 from missing_functions import device_operation_excel_and_save
 
 
 class AccountBackupExecutor:
-    """Handle Excel-driven account backup logic."""
+    """Handle the Excel-based account backup workflow."""
 
     def __init__(
         self,
@@ -49,13 +47,13 @@ class AccountBackupExecutor:
         if current_row is None:
             return
 
-        logger.info("Excelバックアップ開始: port=%s, start_row=%d", ports, current_row)
+        logger.info("Excelバックアップ開始 ports=%s start_row=%d", ports, current_row)
         reset_adb_server()
 
         while current_row <= total_rows and not self.core.is_stopping():
             self.multi_device_service.remove_all_nox()
 
-            chunk = []
+            chunk: list[tuple[str, int]] = []
             for port in ports:
                 if current_row > total_rows:
                     break
@@ -68,7 +66,7 @@ class AccountBackupExecutor:
             logger.debug("バックアップ対象: %s", chunk)
             self._process_chunk(workbook, chunk)
 
-        logger.info("Excelバックアップ終了")
+        logger.info("Excelバックアップ完了")
 
     # ------------------------------------------------------------------ #
     # Helpers
@@ -77,7 +75,7 @@ class AccountBackupExecutor:
         snapshot = self.config_service.load()
         ports = self.config_service.get_ports_for_device_count(snapshot.device_count)
         if not ports:
-            logger.error("Excelバックアップ: ポート設定が取得できませんでした。config.json を確認してください。")
+            logger.error("Excelバックアップ: ポート設定が見つかりません。config.json を確認してください。")
         return ports
 
     def _load_workbook(self, filename: str):
@@ -96,7 +94,7 @@ class AccountBackupExecutor:
     def _resolve_start_row(self, total_rows: int) -> Optional[int]:
         row = get_target_folder()
         if row is None:
-            logger.info("Excelバックアップ: 行番号が選択されませんでした。処理を中断します。")
+            logger.info("Excelバックアップ: 行番号が指定されなかったため中断します。")
             return None
         try:
             value = int(row)
@@ -111,8 +109,8 @@ class AccountBackupExecutor:
         return value
 
     def _process_chunk(self, workbook, assignments: Sequence[tuple[str, int]]) -> None:
-        events = []
-        logger.debug("バックアップ処理: %s", assignments)
+        events: list[tuple[threading.Event, str]] = []
+        logger.debug("バックアップ処理 %s", assignments)
         ml = MultiDeviceLogger([port for port, _ in assignments])
 
         with ThreadPoolExecutor(max_workers=len(assignments)) as executor:
