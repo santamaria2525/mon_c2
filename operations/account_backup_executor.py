@@ -4,15 +4,16 @@
 from __future__ import annotations
 
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Optional, Sequence, Mapping, Tuple
 
 import openpyxl  # type: ignore
 
 from adb_utils import reset_adb_server
 from logging_util import MultiDeviceLogger, logger
 from utils import display_message, get_target_folder
+from config import get_config_value
 
 from services import ConfigService, MultiDeviceService
 from missing_functions import device_operation_excel_and_save
@@ -49,22 +50,73 @@ class AccountBackupExecutor:
 
         logger.info("Excelバックアップ開始 ports=%s start_row=%d", ports, current_row)
         reset_adb_server()
+        skip_nox_restart = bool(get_config_value("skip_nox_restart_on_fail", False))
 
-        while current_row <= total_rows and not self.core.is_stopping():
-            self.multi_device_service.remove_all_nox()
+        # Portごとの進捗を管理し、空いた端末から順に次の行を処理する
+        pending_rows = list(range(current_row, total_rows + 1))
+        completed_rows: set[int] = set()
+        active_rows: dict[str, int] = {}
 
-            chunk: list[tuple[str, int]] = []
-            for port in ports:
-                if current_row > total_rows:
-                    break
-                chunk.append((port, current_row))
-                current_row += 1
-
-            if not chunk:
+        while pending_rows or active_rows:
+            if self.core.is_stopping():
                 break
 
-            logger.debug("バックアップ対象: %s", chunk)
-            self._process_chunk(workbook, chunk)
+            # 空いているポートがあれば次の行を割り当てる
+            for port in ports:
+                if port in active_rows:
+                    continue
+                while pending_rows and pending_rows[0] in completed_rows:
+                    pending_rows.pop(0)
+                if not pending_rows:
+                    break
+                row = pending_rows.pop(0)
+                if row > total_rows:
+                    continue
+                if not skip_nox_restart:
+                    self.multi_device_service.remove_all_nox([port])
+                logger.debug("バックアップ開始: port=%s row=%s", port, row)
+                active_rows[port] = row
+
+            if not active_rows:
+                break
+
+            results = self._process_active_rows(workbook, active_rows)
+            for port, result in results.items():
+                row = active_rows.pop(port, None)
+                if row is None:
+                    continue
+                row_label = f"{row:03d}"
+                success, error_message = result
+                if success:
+                    completed_rows.add(row)
+                    logger.info(
+                        "Excelバックアップ: %s行、成功 (port=%s) / 累計完了=%d行",
+                        row_label,
+                        port,
+                        len(completed_rows),
+                    )
+                else:
+                    reason = error_message or "原因不明のエラー"
+                    logger.error(
+                        "Excelバックアップ: %s行、%sにより失敗 (port=%s)",
+                        row_label,
+                        reason,
+                        port,
+                    )
+                    logger.debug(
+                        "Excelバックアップ: 行%s 失敗詳細 (port=%s) -> %s",
+                        row_label,
+                        port,
+                        reason,
+                    )
+                    should_restart = (
+                        not skip_nox_restart
+                        and (not reason or any(keyword in reason for keyword in ("タイムアップ", "フリーズ", "応答なし")))
+                    )
+                    if should_restart:
+                        self.multi_device_service.remove_all_nox([port])
+                        logger.warning("Excelバックアップ: port=%s のNOXを再起動しました", port)
+                    pending_rows.append(row)
 
         logger.info("Excelバックアップ完了")
 
@@ -108,37 +160,42 @@ class AccountBackupExecutor:
             return None
         return value
 
-    def _process_chunk(self, workbook, assignments: Sequence[tuple[str, int]]) -> None:
-        events: list[tuple[threading.Event, str]] = []
-        logger.debug("バックアップ処理 %s", assignments)
-        ml = MultiDeviceLogger([port for port, _ in assignments])
+    def _process_active_rows(
+        self, workbook, active_rows: Mapping[str, int]
+    ) -> Mapping[str, tuple[bool, str]]:
+        """処理中の行を並列実行し、ポートごとの成否とエラーメッセージを返す。"""
+        ports = list(active_rows.keys())
+        folders = [f"{row:03d}" for row in active_rows.values()]
+        ml = MultiDeviceLogger(ports, folders)
+        results: dict[str, bool] = {}
 
-        with ThreadPoolExecutor(max_workers=len(assignments)) as executor:
-            futures = []
-            for port, row in assignments:
-                event = threading.Event()
-                events.append((event, port))
-                future = executor.submit(
+        with ThreadPoolExecutor(max_workers=len(ports)) as executor:
+            future_map = {
+                executor.submit(
                     device_operation_excel_and_save,
                     port,
                     workbook,
                     row,
                     row,
-                    event,
+                    threading.Event(),
                     ml,
-                )
-                futures.append((port, future))
+                ): port
+                for port, row in active_rows.items()
+            }
 
-        for event, _ in events:
-            event.wait()
+            for future in as_completed(future_map):
+                port = future_map[future]
+                try:
+                    results[port] = bool(future.result())
+                except Exception as exc:  # pragma: no cover - defensive logging
+                    logger.error("Excelバックアップ: %s で例外が発生しました: %s", port, exc)
+                    results[port] = False
 
-        for port, future in futures:
-            try:
-                future.result()
-            except Exception as exc:  # pragma: no cover - defensive logging
-                logger.error("Excelバックアップ: %s で例外が発生しました: %s", port, exc)
-
-        ml.summarize_results("Excelバックアップ")
+        ml.summarize_results("Excelバックアップ", suppress_summary=True)
+        detailed_results: dict[str, tuple[bool, str]] = {}
+        for port, ok in results.items():
+            detailed_results[port] = (ok, ml.get_error(port))
+        return detailed_results
 
 
 __all__ = ["AccountBackupExecutor"]

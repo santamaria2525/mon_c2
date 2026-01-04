@@ -87,6 +87,44 @@ import pyautogui
 from config import room_key1, room_key2
 from utils import replace_multiple_lines_in_file, activate_window_and_right_click
 from monst.image import tap_if_found_on_windows, tap_until_found_on_windows
+from logging_util import logger
+
+
+def _run_start_app_with_retry(start_app_path: str, label: str, wait_seconds: float) -> None:
+    """Ensure start_app.exe launches reliably with retries."""
+    attempts = 3
+    for attempt in range(1, attempts + 1):
+        try:
+            logger.info(f"[HASYA] start_app.exe 実行 ({label}) attempt {attempt}/{attempts}")
+            subprocess.run(start_app_path, check=True)
+            time.sleep(wait_seconds)
+            logger.info(f"[HASYA] start_app.exe 正常終了 ({label})")
+            return
+        except subprocess.CalledProcessError as exc:
+            logger.error(f"[HASYA] start_app.exe 失敗 ({label}) attempt {attempt}: {exc}")
+            time.sleep(2)
+        except Exception as exc:
+            logger.error(f"[HASYA] start_app.exe 例外 ({label}) attempt {attempt}: {exc}")
+            time.sleep(2)
+    raise RuntimeError(f"start_app.exe が {attempts} 回連続で失敗しました ({label})")
+
+
+def _wait_for_load_button(start_app_path: str, label: str, *, timeout: float = 15.0, retry_wait: float = 5.0) -> None:
+    """
+    load.png が表示されるまで監視し、一定時間見つからない場合は start_app.exe を再実行する。
+    """
+    last_retry = time.time()
+    while not tap_if_found_on_windows("tap", "load.png", "macro"):
+        tap_if_found_on_windows("tap", "macro.png", "macro")
+        if tap_if_found_on_windows("stay", "koushin.png", "macro") or tap_if_found_on_windows(
+            "stay", "koshin.png", "macro"
+        ):
+            tap_if_found_on_windows("tap", "close.png", "macro")
+        time.sleep(0.5)
+        if time.time() - last_retry >= timeout:
+            logger.warning("[HASYA] load.png が表示されないため start_app.exe を再実行します (%s)", label)
+            _run_start_app_with_retry(start_app_path, f"{label} retry", retry_wait)
+            last_retry = time.time()
 
 def continue_hasya():
     """
@@ -129,20 +167,12 @@ def continue_hasya():
 
         time.sleep(1)  # 書き換え後に少し待機
 
-        # アプリ起動
-        subprocess.run(start_app)
-        time.sleep(8)  # アプリ起動を十分に待つ（4秒→8秒に延長）
+        _run_start_app_with_retry(start_app, f"continue_hasya device {window_name} ({port})", 8.0)
 
         # **load09.png と load10.png を条件で切り替え**
         load_image = "load10.png" if window_name in ["4", "8"] else "load09.png"
 
-        # 画面のロード完了まで待機
-        while not tap_if_found_on_windows("tap", "load.png", "macro"):
-            tap_if_found_on_windows("tap", "macro.png", "macro")
-            # koushinまたはkoshinの両方をチェック（画像名の違いに対応）
-            if (tap_if_found_on_windows("stay", "koushin.png", "macro") or 
-                tap_if_found_on_windows("stay", "koshin.png", "macro")):
-                tap_if_found_on_windows("tap", "close.png", "macro")
+        _wait_for_load_button(start_app, f"continue_hasya device {window_name} ({port})")
         tap_until_found_on_windows(load_image, "macro", "load.png", "macro")
         tap_until_found_on_windows("kaishi.png", "macro", load_image, "macro")
         tap_until_found_on_windows("nox.png", "macro", "kaishi.png", "macro")
@@ -196,14 +226,12 @@ def load_macro(number: int):
 
         time.sleep(1)  # 書き換え後に少し待機
 
-        # アプリ起動
-        subprocess.run(start_app)
-        time.sleep(2)  # アプリ起動を待つ
+        _run_start_app_with_retry(start_app, f"load_macro device {window_name} ({port})", 2.0)
 
         load_image = "load09.png"
 
         # 画面のロード完了まで待機
-        tap_until_found_on_windows("load.png", "macro", "macro.png", "macro")
+        _wait_for_load_button(start_app, f"load_macro device {window_name} ({port})", timeout=12.0, retry_wait=3.0)
         tap_until_found_on_windows(load_image, "macro", "load.png", "macro")
         pyautogui.press("down", presses=number - 1)
         time.sleep(0.5)
@@ -273,20 +301,19 @@ def continue_hasya_with_base_folder(base_folder: int):
 
         time.sleep(1)  # 書き換え後に少し待機
 
-        # アプリ起動
-        subprocess.run(start_app)
-        time.sleep(8)  # アプリ起動を十分に待つ（4秒→8秒に延長）
+        _run_start_app_with_retry(
+            start_app,
+            f"continue_hasya_with_base_folder base {base_folder} device {window_name} ({port})",
+            8.0,
+        )
 
         # **load09.png と load10.png を条件で切り替え**
         load_image = "load10.png" if window_name in ["4", "8"] else "load09.png"
 
-        # 画面のロード完了まで待機
-        while not tap_if_found_on_windows("tap", "load.png", "macro"):
-            tap_if_found_on_windows("tap", "macro.png", "macro")
-            # koushinまたはkoshinの両方をチェック（画像名の違いに対応）
-            if (tap_if_found_on_windows("stay", "koushin.png", "macro") or 
-                tap_if_found_on_windows("stay", "koshin.png", "macro")):
-                tap_if_found_on_windows("tap", "close.png", "macro")
+        _wait_for_load_button(
+            start_app,
+            f"continue_hasya_with_base_folder base {base_folder} device {window_name} ({port})",
+        )
         tap_until_found_on_windows(load_image, "macro", "load.png", "macro")
         tap_until_found_on_windows("kaishi.png", "macro", load_image, "macro")
         tap_until_found_on_windows("nox.png", "macro", "kaishi.png", "macro")

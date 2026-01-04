@@ -136,6 +136,10 @@ class OperationsFacade:
     def run_shitei_click(self) -> None:
         self.shitei_click_executor.run()
 
+    def run_id_check(self) -> None:
+        """Bridge to legacy IDチェック処理."""
+        self.legacy.main_id_check()
+
     # ------------------------------------------------------------------ #
     # Legacy bridge
     # ------------------------------------------------------------------ #

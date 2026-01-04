@@ -12,7 +12,8 @@ from __future__ import annotations
 import ctypes
 import ctypes.wintypes
 import time
-from typing import Any, List, Optional, Tuple
+from typing import Any, List, Optional, Tuple, Sequence
+import threading
 
 import pyautogui
 import pygetwindow as gw
@@ -33,6 +34,10 @@ RIGHT_CLICK_MOVE_DURATION_SECONDARY = 0.25
 RIGHT_CLICK_HOLD_PRIMARY = 0.12
 RIGHT_CLICK_HOLD_SECONDARY = 0.18
 RIGHT_CLICK_INTER_CLICK_DELAY = 0.55
+_dialog_monitor_lock = threading.Lock()
+_dialog_monitor_thread = None
+_dialog_monitor_stop = threading.Event()
+_NOX_WIDGET_KEYWORDS = ("noxウィジェット", "nox widget")
 
 
 # ---------------------------------------------------------------------------
@@ -92,6 +97,14 @@ def _close_window(window: Any) -> bool:
     return False
 
 
+def _is_nox_widget(title: str) -> bool:
+    """Return True when the window title indicates the NOX widget popup."""
+    if not title:
+        return False
+    lowered = title.lower()
+    return any(keyword in lowered for keyword in _NOX_WIDGET_KEYWORDS)
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -101,14 +114,20 @@ def close_windows_by_title(
     exact: bool = False,
     include_hidden: bool = False,
     case_insensitive: bool = False,
+    exclude_keywords: Optional[Sequence[str]] = None,
 ) -> int:
     """Close all windows whose title matches ``title_keyword``."""
     windows = _collect_windows(include_hidden=include_hidden)
     closed = 0
+    excludes_lower = tuple((kw or "").lower() for kw in exclude_keywords or ())
 
     for window in windows:
         try:
             title = window.title or ""
+            lowered_title = title.lower()
+
+            if excludes_lower and any(ex_kw in lowered_title for ex_kw in excludes_lower):
+                continue
             if not _matches_title(
                 title,
                 title_keyword,
@@ -171,6 +190,7 @@ def close_nox_error_dialogs() -> int:
         "noxvm",
         "bignox",
         "noxpack",
+        "ご注意",
     ]
 
     extra_terms = [
@@ -180,16 +200,23 @@ def close_nox_error_dialogs() -> int:
         "蜍穂ｽ懊ｒ蛛懈ｭ｢",
         "蠢懃ｭ斐＠縺ｦ縺・∪縺帙ｓ",
         "繧ｨ繝ｩ繝ｼ",
+        "仮想マシン",
+        "フィードバック",
+        "1040",
     ]
+    vm_failure_terms = {"仮想マシン", "フィードバック", "1040"}
 
     closed = 0
 
     # First pass: direct keyword match
+    vm_failure_detected = False
+
     for keyword in error_keywords:
         closed += close_windows_by_title(
             keyword,
             include_hidden=True,
             case_insensitive=True,
+            exclude_keywords=_NOX_WIDGET_KEYWORDS,
         )
 
     # Second pass: relaxed matching with additional error phrases
@@ -202,20 +229,33 @@ def close_nox_error_dialogs() -> int:
             if not title:
                 continue
 
-            lower = title.lower()
-            if not any(base in lower for base in keyword_lower):
+            if _is_nox_widget(title):
                 continue
-            if not any(term in lower for term in extra_lower):
+
+            lower = title.lower()
+            matches_base = any(base in lower for base in keyword_lower)
+            if not matches_base and "ご注意" not in lower:
+                continue
+            matches_extra = any(term in lower for term in extra_lower)
+            if not matches_extra:
                 continue
 
             if _close_window(window):
                 closed += 1
+                if any(term in lower for term in vm_failure_terms):
+                    vm_failure_detected = True
                 time.sleep(0.1)
         except Exception as exc:
             logger.debug("NOX error window handling failed: %s", exc)
 
     if closed:
         logger.info("NOX 繧ｨ繝ｩ繝ｼ繝繧､繧｢繝ｭ繧ｰ繧・%d 莉ｶ髢峨§縺ｾ縺励◆", closed)
+    if vm_failure_detected:
+        try:
+            from monst.image.device_management import notify_virtual_machine_failure
+            notify_virtual_machine_failure()
+        except Exception as exc:
+            logger.debug("Failed to notify virtual machine failure: %s", exc)
 
     return closed
 
@@ -248,6 +288,46 @@ def close_adb_error_dialogs() -> int:
         logger.info("ADB エラーダイアログを %d 件閉じました", closed)
 
     return closed
+
+
+def _dialog_monitor_loop(interval: float) -> None:
+    while not _dialog_monitor_stop.wait(interval):
+        try:
+            closed = 0
+            closed += close_adb_error_dialogs()
+            closed += close_nox_error_dialogs()
+            if not closed:
+                close_windows_by_title(
+                    "adb.exe - アプリケーション エラー", include_hidden=True, case_insensitive=True
+                )
+        except Exception as exc:
+            logger.debug("Error dialog monitor loop failed: %s", exc)
+
+
+def start_error_dialog_monitor(interval: float = 5.0) -> None:
+    """Start a background thread that continuously dismisses error dialogs."""
+    global _dialog_monitor_thread
+    with _dialog_monitor_lock:
+        if _dialog_monitor_thread and _dialog_monitor_thread.is_alive():
+            return
+        _dialog_monitor_stop.clear()
+        _dialog_monitor_thread = threading.Thread(
+            target=_dialog_monitor_loop,
+            args=(max(1.0, interval),),
+            name="ErrorDialogMonitor",
+            daemon=True,
+        )
+        _dialog_monitor_thread.start()
+
+
+def stop_error_dialog_monitor() -> None:
+    global _dialog_monitor_thread
+    with _dialog_monitor_lock:
+        if not _dialog_monitor_thread:
+            return
+        _dialog_monitor_stop.set()
+        _dialog_monitor_thread.join(timeout=2.0)
+        _dialog_monitor_thread = None
 
 
 def handle_windows(title: str = "monst_macro") -> bool:

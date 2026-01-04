@@ -365,3 +365,67 @@ def _verify_excel_save(filepath: str, expected_row: int, expected_folder: str) -
     except Exception as e:
         logger.error(f"保存確認中にエラー: {e}")
         return False
+
+
+def update_orb_player_id(filename: str, folder: str, player_id: str) -> bool:
+    """
+    既存のオーブデータExcelにプレイヤーIDを追記する。
+
+    Args:
+        filename: Excelファイル名（例: orb_data.xlsx）
+        folder: フォルダ番号
+        player_id: 取得したプレイヤーID
+
+    Returns:
+        bool: 更新成功かどうか
+    """
+    if not player_id:
+        logger.warning("Player IDが空のためExcel更新をスキップします")
+        return False
+
+    excel_filename = filename if filename.endswith(".xlsx") else filename.replace(".csv", ".xlsx")
+    from utils.path_manager import get_base_path
+    base_path = get_base_path()
+    excel_filepath = os.path.join(base_path, excel_filename)
+
+    if not os.path.exists(excel_filepath):
+        logger.warning("orbデータExcelが存在しません: %s", excel_filepath)
+        return False
+
+    file_lock = _get_excel_lock(excel_filepath)
+    with file_lock:
+        try:
+            wb = load_workbook(excel_filepath)
+            ws = wb.active
+            target_row = None
+            normalized_target = str(folder).zfill(3)
+
+            for row in range(ws.max_row, 1, -1):
+                cell_value = ws.cell(row=row, column=3).value
+                if cell_value is None:
+                    continue
+                normalized_cell = str(cell_value).zfill(3)
+                if normalized_cell == normalized_target:
+                    target_row = row
+                    break
+
+            if target_row is None:
+                logger.warning("フォルダ%sに対応する行が見つからないためID更新をスキップします", folder)
+                return False
+
+            ws.cell(row=target_row, column=8, value=player_id)
+
+            import tempfile
+            import shutil
+
+            temp_dir = os.path.dirname(excel_filepath) if os.path.dirname(excel_filepath) else "."
+            with tempfile.NamedTemporaryFile(mode="wb", delete=False, dir=temp_dir, suffix=".xlsx") as temp_file:
+                wb.save(temp_file.name)
+                temp_filepath = temp_file.name
+
+            shutil.move(temp_filepath, excel_filepath)
+            logger.info("orbデータExcelにPlayer IDを追記しました (フォルダ=%s, ID=%s)", folder, player_id)
+            return True
+        except Exception as exc:
+            logger.error("orbデータExcelのID更新でエラー: %s", exc, exc_info=True)
+            return False

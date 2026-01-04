@@ -61,10 +61,10 @@ def _detect_nox_adb_path() -> str:
 
 def _safe_print(level: str, message: str) -> None:
     """安全なログ出力（logging_util依存を排除）"""
-    try:
-        print(f"[{level}] {message}")
-    except:
-        pass  # 出力エラーも無視
+    _ = level, message  # 画面表示は行わない（静かな起動）
+
+_CONFIG_PATH_ANNOUNCED = False
+_CONFIG_LOADED_ANNOUNCED = False
 
 def get_ports_by_count(device_count: int) -> List[str]:
     """
@@ -209,6 +209,10 @@ class _Config:
     independent_worker_timeout: int = 300
     independent_retry_failed_folders: bool = True
     
+    # ADB/NOX安全設定
+    skip_adb_reset: bool = True
+    skip_nox_restart_on_fail: bool = False
+    
     # 追加設定用
     extra: Dict[str, Any] = field(default_factory=dict)
     
@@ -233,6 +237,13 @@ class _ConfigLoader:
         """JSONファイルから設定を読み込み"""
         # ファイルパスの決定
         config_path = _get_resource_path(cls._path)
+        try:
+            global _CONFIG_PATH_ANNOUNCED
+            if not _CONFIG_PATH_ANNOUNCED:
+                _safe_print("INFO", f"config path: {config_path}")
+                _CONFIG_PATH_ANNOUNCED = True
+        except Exception:
+            pass
         
         try:
             with open(config_path, encoding="utf-8") as fp:
@@ -322,6 +333,14 @@ class _ConfigLoader:
             cls._cfg = cls._read()
             # グローバル変数をエクスポート
             _export_globals(cls._cfg)
+            try:
+                global _CONFIG_LOADED_ANNOUNCED
+                if force or not _CONFIG_LOADED_ANNOUNCED:
+                    _safe_print("INFO", f"config loaded (on_event={getattr(cls._cfg, 'on_event', None)})")
+                    if not force:
+                        _CONFIG_LOADED_ANNOUNCED = True
+            except Exception:
+                pass
             # Quiet startup: suppress config loaded info
             # _safe_print("INFO", "設定を読み込みました")
         return cls._cfg
@@ -385,7 +404,7 @@ _safe_initialize()
 # ---------------------------------------------------------------------------
 
 # フォルダ・処理制限
-MAX_FOLDER_LIMIT = 3000
+MAX_FOLDER_LIMIT = 4000
 MAX_FOLDER_SEARCH_ATTEMPTS = 100
 MAX_CONSECUTIVE_FAILURES = 50
 

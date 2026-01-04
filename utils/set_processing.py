@@ -20,7 +20,7 @@ from logging_util import logger, MultiDeviceLogger
 from contextlib import contextmanager
 
 # 循環インポート回避のため定数を直接定義
-MAX_FOLDER_LIMIT = 3000
+MAX_FOLDER_LIMIT = 4000
 
 @contextmanager
 def _tk_root(*, topmost: bool = True):
@@ -357,67 +357,47 @@ def run_continuous_set_loop(
     operation_name: str,
     custom_args: Optional[dict] = None
 ) -> None:
-    """
-    8端末セット継続ループ処理
-    
-    8端末でログイン処理完了後、確認ダイアログを表示し、
-    OKが押されたら同じ8端末で次のフォルダセットを処理する。
-    
-    Args:
-        base_folder: 開始フォルダ番号
-        operation: 実行する操作関数
-        ports: 使用する端末ポートリスト
-        operation_name: 操作名
-        custom_args: 追加引数
-    """
+    """8???????????????????????????????"""
     current_folder = base_folder
     round_number = 1
     num_devices = len(ports)
-    
-    logger.info(f"🔄 8端末継続ループ開始: {operation_name} ({num_devices}台)")
-    
+
+    logger.info(f"[Loop] 8?????????: {operation_name} (???={num_devices})")
+
     while True:
         try:
-            logger.info(f"\n🎯 === ラウンド{round_number} 処理開始 ===")
-            
-            # 8端末分のフォルダを検索
+            logger.info(f"[Loop] === ????{round_number} ?? ===")
             next_folder, folders = find_next_set_folders(current_folder, num_devices)
-            
             if not folders:
-                logger.info("🏁 処理可能なフォルダが見つかりません。処理終了")
+                logger.info("[Loop] ???????????????????????")
                 break
-            
-            # 実際に使用する端末数を調整（8端末固定想定）
+
             actual_ports = ports[:len(folders)]
-            
-            logger.info(f"📂 処理フォルダ: {', '.join(folders)}")
-            logger.info(f"📱 使用端末: {len(actual_ports)}台")
-            
-            # 8端末セットを同時並列処理
+            logger.info(f"[Loop] ??????: {', '.join(folders)} / ???: {len(actual_ports)}")
+
             success_count = process_set_parallel(
                 folders, actual_ports, operation, operation_name, custom_args
             )
-            
-            logger.info(f"✅ ラウンド{round_number} 完了: {success_count}/{len(folders)} 端末成功")
-            
-            # 8端末セット完了後の継続確認ダイアログ
+
+            # 8???????????????????????
             if not show_loop_continue_dialog():
-                logger.info("🛑 ユーザーにより8端末ループ停止")
+                logger.info("[Loop] ???????????")
                 break
-            
-            # 次のラウンドに進む
+
+            logger.info(f"[Loop] ????{round_number} ??: {success_count}/{len(folders)} ????")
+
             current_folder = next_folder
             round_number += 1
-            
+
             if current_folder > MAX_FOLDER_LIMIT:
-                logger.info(f"🏁 フォルダ上限 ({MAX_FOLDER_LIMIT}) に到達。処理終了")
+                logger.info(f"[Loop] ?????? ({MAX_FOLDER_LIMIT}) ?????????")
                 break
-                
-        except Exception as e:
-            logger.error(f"❌ ラウンド{round_number} 処理エラー: {e}")
+
+        except Exception as exc:
+            logger.error(f"[Loop] ????{round_number} ????: {exc}")
             if not show_loop_continue_dialog():
                 break
             current_folder = next_folder if next_folder else current_folder + num_devices
             round_number += 1
-    
-    logger.info(f"🎉 8端末継続ループ完了: 合計{round_number-1}ラウンド処理")
+
+    logger.info(f"[Loop] 8?????????: ??{round_number - 1}??????")

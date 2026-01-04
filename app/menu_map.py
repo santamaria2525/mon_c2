@@ -27,6 +27,7 @@ def build_menu(operations) -> Dict[str, MenuCallback]:
         "シングル初期化": operations.reset_single,
         "シングル保存": operations.save_single,
         "フレンド登録システム": operations.run_friend_registration,
+        "IDチェック": operations.run_id_check,
         "エクセルから引継ぎ保存": operations.run_account_backup,
         "指定画像クリック": operations.run_shitei_click,
         "---": None,

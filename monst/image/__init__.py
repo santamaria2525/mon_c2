@@ -14,7 +14,7 @@ from .core import (
     tap_if_found,
     find_image_count,
 )
-from .recognition import read_orb_count, read_account_name, save_account_name_image, save_orb_count_image
+from .recognition import read_orb_count, read_account_name, save_account_name_image, save_orb_count_image, is_ocr_available
 from .gacha_capture import save_character_ownership_image, save_full_gacha_screen_image
 from .device_control import (
     tap_until_found,
@@ -52,6 +52,7 @@ __all__ = [
     "read_account_name",
     "save_account_name_image",
     "save_orb_count_image",
+    "is_ocr_available",
     "save_character_ownership_image",
     "save_full_gacha_screen_image",
     "tap_until_found",

@@ -74,7 +74,6 @@ class SummaryLogFilter(logging.Filter):
         important_patterns = [
             "✅ フォルダ",  # フォルダ成功ログ（最重要）
             "❌ フォルダ",  # フォルダ失敗ログ（最重要）
-            "フォルダ",     # フォルダ関連はすべて表示
             "🔄 NOX再起動",  # NOX再起動の簡潔ログ
             "処理完了：",  # バッチ処理完了サマリー
             "システム終了",
@@ -86,6 +85,8 @@ class SummaryLogFilter(logging.Filter):
             "エラー",      # エラーログは必ず表示
             "ERROR"        # ERRORレベルは必ず表示
         ]
+        important_patterns.extend(["覇者セット開始", "覇者終了"])
+
         
         # 非表示にするログのパターン（詳細操作ログを抑制）
         suppress_patterns = [
@@ -166,15 +167,34 @@ class SummaryLogFilter(logging.Filter):
             "62032"
         ]
         
+        folder_keywords = (
+            "作業完了",
+            "作業失敗",
+            "作業再開",
+            "作業再試行",
+            "作業中断",
+            "作業開始",
+            "成功",
+            "失敗",
+        )
+
         # まず抑制パターンをチェック（フォルダ関連以外）
         if "フォルダ" not in message:
             for pattern in suppress_patterns:
                 if pattern in message:
                     return False
         
-        # フォルダ関連ログは最優先で通す
-        if "フォルダ" in message and ("成功" in message or "失敗" in message):
-            return True
+        if "フォルダ" in message:
+            if record.levelno >= logging.WARNING:
+                return True
+            if (
+                "端末" in message
+                and record.levelno < logging.WARNING
+                and not any(keyword in message for keyword in folder_keywords)
+            ):
+                return False
+            if any(keyword in message for keyword in folder_keywords):
+                return True
         
         # 重要なログは通す
         for pattern in important_patterns:
@@ -318,6 +338,7 @@ def setup_logger(log_file_path: str = "app.log", level: int = logging.INFO) -> l
     _ensure_log_dir(target_path)
 
     formatter = logging.Formatter(_FORMAT)
+    summary_filter = SummaryLogFilter()
 
     file_handler = RotatingFileHandler(
         target_path,
@@ -326,12 +347,13 @@ def setup_logger(log_file_path: str = "app.log", level: int = logging.INFO) -> l
         encoding="utf-8",
     )
     file_handler.setFormatter(formatter)
+    file_handler.addFilter(summary_filter)
     logger_.addHandler(file_handler)
 
     console_handler = logging.StreamHandler()
     console_handler.setFormatter(_ColorFormatter(_FORMAT))
     console_handler.setLevel(logging.INFO)
-    console_handler.addFilter(SummaryLogFilter())
+    console_handler.addFilter(summary_filter)
     logger_.addHandler(console_handler)
 
     logger_.setLevel(level)
@@ -356,6 +378,16 @@ class MultiDeviceLogger:
         self._folders = folders or ["" for _ in device_ports]
         self._lock = threading.Lock()
         self._device_ports = device_ports
+        self._folder_map: Dict[str, str] = {}
+        if folders:
+            for idx, port in enumerate(device_ports):
+                if idx < len(folders):
+                    self._folder_map[port] = folders[idx]
+                else:
+                    self._folder_map[port] = ""
+        else:
+            for port in device_ports:
+                self._folder_map[port] = ""
 
     # -------------------------------------------------- public callbacks ---#
 
@@ -367,6 +399,10 @@ class MultiDeviceLogger:
         with self._lock:
             self._results[device_port] = False
             self._errors[device_port] = message
+
+    def get_error(self, device_port: str) -> str:
+        with self._lock:
+            return self._errors.get(device_port, "")
     
     def update_task_status(self, device_port: str, folder: str, operation: str) -> None:
         """タスクモニターに処理状況を更新（複数の方法を試行）"""
@@ -411,39 +447,50 @@ class MultiDeviceLogger:
 
     # --------------------------------------------------- final summary ----#
 
-    def summarize_results(self, operation_name: str) -> None:
+    def summarize_results(self, operation_name: str, suppress_summary: bool = False) -> tuple[int, int]:
         """Summarise run – now includes folder range like "001-008" so the
         log directly shows *which* folders were processed.
         """
         total = len(self._results)
         success = sum(self._results.values())
 
-        # ---- calculate folder span (if all names look numeric) -------------
-        folder_range = ""
-        try:
-            nums = [int(f) for f in self._folders if str(f).isdigit()]
-            if nums:
-                folder_range = f"{min(nums):03d}-{max(nums):03d}"
-        except Exception:
-            # any parsing failure → just leave folder_range empty
-            pass
+        if suppress_summary:
+            if success != total:
+                logger.error("%s: %d/%d 成功", operation_name, success, total)
+                for port, ok in self._results.items():
+                    if not ok:
+                        folder = self._folder_map.get(port, "")
+                        if folder:
+                            logger.error(
+                                "  行%s (%s): %s",
+                                folder,
+                                port,
+                                self._errors.get(port, "原因不明の失敗"),
+                            )
+                        else:
+                            logger.error("  %s: %s", port, self._errors.get(port, "原因不明の失敗"))
+            return success, total
 
         # ---- success path ---------------------------------------------------
         if success == total:
-            if folder_range:
-                logger.info("%s: %d/%d 成功 (%s)", operation_name, success, total, folder_range)
-            else:
-                logger.info("%s: %d/%d 成功", operation_name, success, total)
-            return
+            logger.info("%s: %d/%d 成功", operation_name, success, total)
+            return success, total
 
         # ---- partial failure ------------------------------------------------
-        if folder_range:
-            logger.error("%s: %d/%d 成功 (%s)", operation_name, success, total, folder_range)
-        else:
-            logger.error("%s: %d/%d 成功", operation_name, success, total)
+        logger.error("%s: %d/%d 成功", operation_name, success, total)
 
-        # per‑device details
+        # per-device details with row numbers
         for port, ok in self._results.items():
             if not ok:
-                logger.error("  %s: %s", port, self._errors.get(port, "原因不明の失敗"))
+                folder = self._folder_map.get(port, "")
+                if folder:
+                    logger.error(
+                        "  行%s (%s): %s",
+                        folder,
+                        port,
+                        self._errors.get(port, "原因不明の失敗"),
+                    )
+                else:
+                    logger.error("  %s: %s", port, self._errors.get(port, "原因不明の失敗"))
+        return success, total
 

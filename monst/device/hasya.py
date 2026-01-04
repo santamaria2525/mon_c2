@@ -13,8 +13,24 @@ from logging_util import logger, MultiDeviceLogger
 from login_operations import device_operation_login
 from monst.adb import perform_action, send_key_event
 from monst.image import tap_if_found, tap_until_found, tap_if_found_on_windows, tap_until_found_on_windows
+from monst.image.device_management import set_host_wait_mode, record_device_progress
+from utils.watchdog import touch_watchdog
 from utils import send_notification_email, replace_multiple_lines_in_file, activate_window_and_right_click
 from config import room_key1, room_key2
+
+
+def _host_housekeeping_sequence(device_port: str) -> None:
+    """ホスト端末の画面を整える軽量処理（必要なときのみ実行）。"""
+    tap_if_found('tap', device_port, "zz_home.png", "key")
+    time.sleep(0.3)
+    tap_if_found('tap', device_port, "quest_c.png", "key")
+    tap_if_found('tap', device_port, "quest.png", "key")
+    time.sleep(0.3)
+    for _ in range(5):
+        tap_if_found('tap', device_port, "a_ok1.png", "key")
+        tap_if_found('tap', device_port, "a_ok2.png", "key")
+        tap_if_found('tap', device_port, "close.png", "key")
+        time.sleep(0.1)
 
 def device_operation_hasya(
     device_port: str, 
@@ -48,15 +64,22 @@ def device_operation_hasya(
                     logger.debug(f"覇者メニュー: hasyatou_icon.png 未検出のため端末 {device_port} で右→左スワイプを実行")
                     perform_action(device_port, 'swipe', 1100, 360, 200, 360, duration=3000)
 
+                hasya_visible = tap_if_found('stay', device_port, "hasyatou.png", "key")
+                if not hasya_visible:
+                    logger.debug(f"覇者イベントメニュー: hasyatou.png 未検出 → 端末 {device_port} で横スライドを実施")
+                    perform_action(device_port, 'swipe', 100, 280, 170, 280, duration=2000)
+
             tap_if_found('tap', device_port, "quest_c.png", "key")
             tap_if_found('tap', device_port, "quest.png", "key")
             tap_if_found('tap', device_port, "ichiran.png", "key")
             tap_if_found('tap', device_port, "ok.png", "key")
             tap_if_found('tap', device_port, "close.png", "key")
-            # 覇者の塔画像を複数チェック（セット1～6対応）
-            hasya_images = ["hasyatou.png", "hasyatou2.png", "hasyatou3.png", "hasyatou4.png", "hasyatou5.png", "hasyatou6.png"]
-            for hasya_img in hasya_images:
-                tap_if_found('tap', device_port, hasya_img, "key")
+            # 覇者の塔表示は基本カード1種類のみを優先
+            hasya_found = tap_if_found('tap', device_port, "hasyatou.png", "key")
+            if not hasya_found:
+                logger.debug(f"覇者カード未検出 → 端末 {device_port} で横スライドを再実施")
+                perform_action(device_port, 'swipe', 100, 280, 170, 280, duration=2000)
+                tap_if_found('tap', device_port, "hasyatou.png", "key")
             tap_if_found('tap', device_port, "shohi20.png", "key")
             tap_if_found('tap', device_port, "minnato.png", "key")
             tap_if_found('tap', device_port, "multi.png", "key")
@@ -100,10 +123,16 @@ def device_operation_hasya_wait(
     
     logger.info(f"ホスト端末 {device_port}: アイコン待機処理を開始（最大6時間）")
 
+    check_interval = 120
+    log_interval = 600
+    last_log = start_time
+
     try:
+        set_host_wait_mode(device_port, True)
         while True:
+            now = time.time()
             # 6時間経過したか確認
-            if time.time() - start_time > timeout:
+            if now - start_time > timeout:
                 send_notification_email(
                     subject="ホスト端末停滞通知",
                     message=f"ホスト端末 {device_port} で6時間以内に覇者作業が完了しませんでした。",
@@ -112,16 +141,19 @@ def device_operation_hasya_wait(
                 logger.warning(f"ホスト端末 {device_port}: 6時間タイムアウト")
                 break
 
-            # icon.png の検出処理（mon6元バージョン完全準拠・シンプル）
+            # icon.png の検出処理（mon_c同様２分毎）
             if tap_if_found('tap', device_port, "icon.png", "key"):
                 logger.info(f"ホスト端末 {device_port}: icon.png検出→8端末マクロ実行へ")
                 break
+            record_device_progress(device_port)
+            touch_watchdog(f"hasya_host_wait:{device_port}")
             
-            # デバッグ用：定期的にアイコン検索状況をログ出力
-            if int(time.time() - start_time) % 600 == 0:  # 10分ごと
-                logger.info(f"ホスト端末 {device_port}: アイコン検索中...({int((time.time() - start_time)/60)}分経過)")
+            if now - last_log >= log_interval:
+                elapsed_minutes = int((now - start_time) / 60)
+                logger.info(f"ホスト端末 {device_port}: アイコン検索中...({elapsed_minutes}分経過)")
+                last_log = now
             
-            time.sleep(120)  # 2分間隔で再チェック
+            time.sleep(check_interval)
 
         if multi_logger:
             multi_logger.log_success(device_port)
@@ -133,6 +165,8 @@ def device_operation_hasya_wait(
         if multi_logger:
             multi_logger.log_error(device_port, error_msg)
         return False
+    finally:
+        set_host_wait_mode(device_port, False)
 
 def device_operation_hasya_fin(
     device_port: str, 
@@ -192,6 +226,59 @@ def device_operation_hasya_fin(
             multi_logger.log_error(device_port, error_msg)
         return False
 
+
+def device_operation_hasya_cleanup(
+    device_port: str,
+    multi_logger: Optional[MultiDeviceLogger] = None,
+) -> bool:
+    """
+    覇者終了後の軽量クリーンアップ処理（hasyafin検知なし）。
+
+    mon_c の終端挙動を参考にしつつ hasyafin*.png の確認だけを省略した版。
+    """
+    start_time = time.time()
+    timeout = 3 * 60  # 3分
+    success = False
+
+    try:
+        logger.info(f"サブ端末 {device_port}: クリーンアップ開始")
+        while time.time() - start_time <= timeout:
+            tap_if_found('tap', device_port, "icon.png", "key")
+            tap_if_found('tap', device_port, "zz_home.png", "key")
+            time.sleep(1)
+            tap_if_found('tap', device_port, "quest_c.png", "key")
+            tap_if_found('tap', device_port, "quest.png", "key")
+            time.sleep(1)
+            for _ in range(5):
+                tap_if_found('tap', device_port, "a_ok1.png", "key")
+                tap_if_found('tap', device_port, "a_ok2.png", "key")
+                tap_if_found('tap', device_port, "close.png", "key")
+
+            record_device_progress(device_port)
+
+            if tap_if_found('stay', device_port, "room.png", "key"):
+                success = True
+                logger.info(f"サブ端末 {device_port}: クリーンアップ完了")
+                break
+
+            time.sleep(1)
+
+        if not success:
+            logger.warning(f"サブ端末 {device_port}: クリーンアップがタイムアウトしました")
+
+        if multi_logger:
+            if success:
+                multi_logger.log_success(device_port)
+            else:
+                multi_logger.log_error(device_port, "覇者クリーンアップ失敗")
+        return success
+
+    except Exception as exc:
+        logger.error(f"サブ端末 {device_port}: クリーンアップ例外: {exc}", exc_info=True)
+        if multi_logger:
+            multi_logger.log_error(device_port, str(exc))
+        return False
+
 def device_operation_hasya_host_fin(
     device_port: str, 
     multi_logger: Optional[MultiDeviceLogger] = None
@@ -212,13 +299,18 @@ def device_operation_hasya_host_fin(
     start_time = time.time()
     timeout = 6 * 60 * 60  # 6時間（秒単位）- ホスト端末用の長時間タイムアウト
     check_interval = 120  # 2分間隔でチェック
+    housekeeping_interval = 600  # 重い画面遷移は10分毎
+    last_housekeeping = start_time - housekeeping_interval  # 初回はすぐ実行
+    last_log = start_time
 
     try:
+        set_host_wait_mode(device_port, True)
         logger.info(f"ホスト端末 {device_port}: 終了検知処理を開始（最大6時間）")
         
         while True:
+            now = time.time()
             # 6時間経過したか確認
-            if time.time() - start_time > timeout:
+            if now - start_time > timeout:
                 send_notification_email(
                     subject="ホスト端末停滞通知", 
                     message=f"ホスト端末 {device_port} で6時間以内に覇者作業が完了しませんでした。",
@@ -227,32 +319,29 @@ def device_operation_hasya_host_fin(
                 logger.warning(f"ホスト端末 {device_port}: 6時間タイムアウト")
                 break
 
-            # 基本的なUI操作（icon.pngチェック）
-            if tap_if_found('tap', device_port, "icon.png", "key"):
-                logger.info(f"ホスト端末 {device_port}: icon.png検出 - 基本処理継続")
-                
-            # ホーム画面への移動
-            tap_if_found('tap', device_port, "zz_home.png", "key")
-            time.sleep(1)
-            
-            # クエスト画面へのアクセス
-            tap_if_found('tap', device_port, "quest_c.png", "key")
-            tap_if_found('tap', device_port, "quest.png", "key")
-            time.sleep(1)
-            
-            # OK/Closeボタンのクリア処理
-            for _ in range(5):  # ホスト端末用に回数調整
-                tap_if_found('tap', device_port, "a_ok1.png", "key")
-                tap_if_found('tap', device_port, "a_ok2.png", "key")
-                tap_if_found('tap', device_port, "close.png", "key")
-            
             # **核心的な終了検知：hasyafin画像の検出**
             if (tap_if_found('tap', device_port, "hasyafin1.png", "key") or 
                 tap_if_found('tap', device_port, "hasyafin2.png", "key") or 
                 tap_if_found('tap', device_port, "hasyafin3.png", "key")):
                 logger.info(f"ホスト端末 {device_port}: 覇者完了検知 - 処理終了")
                 break
+
+            # 基本的なUI操作（2分ごとの軽量チェック）
+            tap_if_found('tap', device_port, "icon.png", "key")
+            record_device_progress(device_port)
+            touch_watchdog(f"hasya_host_finish:{device_port}")
+
+            # 10分毎に重い画面整備を実行
+            if now - last_housekeeping >= housekeeping_interval:
+                logger.debug(f"ホスト端末 {device_port}: 画面整備処理を実行")
+                _host_housekeeping_sequence(device_port)
+                last_housekeeping = now
                 
+            if now - last_log >= housekeeping_interval:
+                elapsed = int((now - start_time) / 60)
+                logger.info(f"ホスト端末 {device_port}: 終了検知継続中...({elapsed}分経過)")
+                last_log = now
+
             # 次のチェックまで待機
             time.sleep(check_interval)
 
@@ -267,6 +356,53 @@ def device_operation_hasya_host_fin(
         if multi_logger:
             multi_logger.log_error(device_port, error_msg)
         return False
+    finally:
+        set_host_wait_mode(device_port, False)
+
+
+def device_operation_hasya_host_cleanup(
+    device_port: str,
+    multi_logger: Optional[MultiDeviceLogger] = None,
+) -> bool:
+    """
+    ホスト端末向けクリーンアップ（hasyafin検知を伴わない簡易版）。
+    """
+    start_time = time.time()
+    timeout = 30 * 60  # 30分
+    success = False
+
+    try:
+        set_host_wait_mode(device_port, True)
+        logger.info(f"ホスト端末 {device_port}: クリーンアップ開始")
+
+        while time.time() - start_time <= timeout:
+            _host_housekeeping_sequence(device_port)
+            record_device_progress(device_port)
+
+            if tap_if_found('stay', device_port, "room.png", "key"):
+                success = True
+                logger.info(f"ホスト端末 {device_port}: クリーンアップ完了")
+                break
+
+            time.sleep(5)
+
+        if not success:
+            logger.warning(f"ホスト端末 {device_port}: クリーンアップがタイムアウトしました")
+
+        if multi_logger:
+            if success:
+                multi_logger.log_success(device_port)
+            else:
+                multi_logger.log_error(device_port, "覇者ホストクリーンアップ失敗")
+        return success
+
+    except Exception as exc:
+        logger.error(f"ホスト端末 {device_port}: クリーンアップ例外: {exc}", exc_info=True)
+        if multi_logger:
+            multi_logger.log_error(device_port, str(exc))
+        return False
+    finally:
+        set_host_wait_mode(device_port, False)
 
 def continue_hasya_parallel() -> None:
     """覇者継続処理を８端末並列実行します（８端末セット対応版）。"""
@@ -668,4 +804,3 @@ def load_macro(number: int) -> None:
 
         # ウィンドウをアクティブにして右クリック
         activate_window_and_right_click(window_name)
-

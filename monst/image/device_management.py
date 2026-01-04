@@ -14,7 +14,7 @@ import subprocess
 import threading
 import time
 from collections import defaultdict
-from typing import Dict, List, Set, Any
+from typing import Dict, List, Set, Any, Sequence, Optional
 
 from config import NOX_ADB_PATH
 from logging_util import logger
@@ -26,6 +26,8 @@ from monst.adb import (
     restart_monster_strike_app
 )
 from utils import send_notification_email
+from utils.device_utils import get_terminal_number
+from utils.device_utils import get_terminal_number
 from .constants import (
     ERROR_COOLDOWN_PERIOD,
     RECOVERY_CHECK_INTERVAL,
@@ -51,6 +53,7 @@ _last_restart_attempt = defaultdict(int)  # 最後の再起動試行時間
 _restart_in_progress = set()  # 再起動処理中のデバイス
 _recovery_attempts = defaultdict(int)  # デバイスごとの回復試行回数
 _scheduled_notifications = {}  # 予定されている通知
+_last_adb_reset_seen: float = 0.0  # ADB??????????
 
 # 無限ループ防止用の新しい変数
 _recovery_attempts = defaultdict(int)  # デバイスごとの回復試行回数
@@ -58,6 +61,53 @@ _recovery_attempt_time = defaultdict(float)  # 最後の回復試行時間
 _emergency_reset_time = 0  # 最後の緊急リセット時間
 MAX_RECOVERY_ATTEMPTS = 10  # 最大回復試行回数（適正値に調整）
 RECOVERY_RESET_INTERVAL = 900  # 回復試行カウントのリセット間隔（15分に短縮）
+
+_progress_lock = threading.Lock()
+_last_progress_time: Dict[str, float] = {}
+_FREEZE_THRESHOLD = 600.0  # 10分
+_FREEZE_CHECK_INTERVAL = 60.0
+_GLOBAL_STALL_RESET_COOLDOWN = 900.0
+_last_global_stall_reset = 0.0
+_host_wait_ports: Set[str] = set()
+_host_wait_lock = threading.Lock()
+_last_virtual_machine_failure = 0.0
+_auto_restart_pause_lock = threading.Lock()
+_auto_restart_pause_depth = 0
+_auto_restart_pause_reason: Optional[str] = None
+
+
+def pause_auto_restart(reason: Optional[str] = None) -> None:
+    """自動再起動を一時的に停止する（ネスト対応）。"""
+    global _auto_restart_pause_depth, _auto_restart_pause_reason
+    with _auto_restart_pause_lock:
+        _auto_restart_pause_depth += 1
+        if _auto_restart_pause_depth == 1:
+            _auto_restart_pause_reason = reason or "unspecified"
+            logger.info("NOX自動再起動を一時停止: %s", _auto_restart_pause_reason)
+        elif reason:
+            _auto_restart_pause_reason = reason
+
+
+def resume_auto_restart() -> None:
+    """自動再起動の一時停止を解除する。"""
+    global _auto_restart_pause_depth, _auto_restart_pause_reason
+    with _auto_restart_pause_lock:
+        if _auto_restart_pause_depth == 0:
+            return
+        _auto_restart_pause_depth -= 1
+        if _auto_restart_pause_depth == 0:
+            logger.info("NOX自動再起動を再開します。")
+            _auto_restart_pause_reason = None
+
+
+def is_auto_restart_paused() -> bool:
+    with _auto_restart_pause_lock:
+        return _auto_restart_pause_depth > 0
+
+
+def get_auto_restart_pause_reason() -> Optional[str]:
+    with _auto_restart_pause_lock:
+        return _auto_restart_pause_reason
 
 def _reset_recovery_attempts_if_expired(device_port: str, current_time: float) -> None:
     """時間経過により回復試行回数をリセットします。
@@ -132,6 +182,8 @@ def mark_device_error(device_port: str, error_message: str) -> None:
     """
     global _error_count, _device_in_error_state, _notified_devices, _error_notified_time, _consecutive_errors, _scheduled_notifications
     current_time = time.time()
+    if current_time - _last_adb_reset_seen < 30:
+        return
     
     # 回復試行回数のタイムリセット処理
     _reset_recovery_attempts_if_expired(device_port, current_time)
@@ -231,6 +283,66 @@ def mark_device_recovered(device_port: str) -> None:
         _consecutive_errors[device_port] = 0  # 連続エラーもリセット
         _recovery_attempts[device_port] = 0  # 回復試行回数もリセット
         _notified_devices.discard(device_port)
+def record_device_progress(device_port: str) -> None:
+    """端末で進捗が確認できたタイミングを記録する。"""
+    with _progress_lock:
+        _last_progress_time[device_port] = time.time()
+
+def have_devices_been_idle(device_ports: Sequence[str], idle_threshold: float) -> bool:
+    """すべての端末が指定秒数以上進捗していないかを判定する。"""
+    if not device_ports:
+        return False
+    now = time.time()
+    with _progress_lock:
+        for device_port in device_ports:
+            last_seen = _last_progress_time.get(device_port)
+            if last_seen is None:
+                return False
+            if now - last_seen < idle_threshold:
+                return False
+    return True
+
+
+def are_devices_ready_for_resume(device_ports: Sequence[str], max_unready: int = 0) -> bool:
+    """全端末がエラー状態でなくADB応答も正常かを確認する。
+
+    max_unready で許容する「再起動中などで未応答の端末」数を指定できる。
+    """
+    if not device_ports:
+        return False
+
+    unready = 0
+    for device_port in device_ports:
+        if is_device_in_error_state(device_port):
+            if device_port in _restart_in_progress and unready < max_unready:
+                unready += 1
+                continue
+            return False
+
+        if not is_device_available(device_port):
+            if device_port in _restart_in_progress and unready < max_unready:
+                unready += 1
+                continue
+            return False
+
+    return True
+
+def set_host_wait_mode(device_port: str, active: bool) -> None:
+    """覇者ホスト待機中の端末を登録/解除する。"""
+    with _host_wait_lock:
+        if active:
+            _host_wait_ports.add(device_port)
+        else:
+            _host_wait_ports.discard(device_port)
+
+
+def _is_host_wait_mode(device_port: str) -> bool:
+    with _host_wait_lock:
+        return device_port in _host_wait_ports
+
+def _is_any_host_waiting() -> bool:
+    with _host_wait_lock:
+        return bool(_host_wait_ports)
 
 def clear_device_cache(device_port: str) -> None:
     """デバイスのキャッシュをクリアします。
@@ -238,12 +350,13 @@ def clear_device_cache(device_port: str) -> None:
     Args:
         device_port: デバイスポート
     """
-    from .core import _last_screenshot, _last_screenshot_time, _screenshot_lock
+    from .core import _last_screenshot, _last_screenshot_time, _last_screen_digest, _screenshot_lock
     
     with _screenshot_lock:
         if device_port in _last_screenshot:
             del _last_screenshot[device_port]
             _last_screenshot_time[device_port] = 0
+            _last_screen_digest.pop(device_port, None)
 
 def _queue_device_restart(device_port: str, restart_type: str = "normal") -> None:
     """デバイス再起動をキューに追加します（安全な間隔で実行）。
@@ -252,8 +365,26 @@ def _queue_device_restart(device_port: str, restart_type: str = "normal") -> Non
         device_port: デバイスポート
         restart_type: 再起動の理由
     """
+    if is_auto_restart_paused():
+        reason = get_auto_restart_pause_reason()
+        logger.debug(
+            "%s: 自動再起動ポーズ中のため再起動キューをスキップ (%s)",
+            device_port,
+            reason or "reason_unknown",
+        )
+        return
+    if _is_host_wait_mode(device_port) or _is_any_host_waiting():
+        logger.debug("%s: 覇者ホスト待機中のため再起動キューをスキップ (%s)", device_port, restart_type)
+        return
+
     # 回復試行回数上限チェック
     if _recovery_attempts.get(device_port, 0) >= MAX_RECOVERY_ATTEMPTS:
+        logger.warning(f"{device_port}: 再起動キュー上限到達。緊急モードで即時再起動を試行します")
+        def _emergency_restart():
+            success = force_restart_nox_device(device_port, emergency=True)
+            if not success:
+                logger.error(f"{device_port}: 緊急再起動に失敗。全体リセットを検討します")
+        threading.Thread(target=_emergency_restart, daemon=True).start()
         return
     
     # 回復試行回数を増やす
@@ -263,6 +394,12 @@ def _queue_device_restart(device_port: str, restart_type: str = "normal") -> Non
         try:
             # グローバルロックを取得して再起動を制御
             with _restart_queue_lock:
+                if is_auto_restart_paused():
+                    logger.debug(
+                        "%s: 自動再起動ポーズ中のため遅延再起動をキャンセル",
+                        device_port,
+                    )
+                    return
                 global _last_global_restart_time
                 current_time = time.time()
                 
@@ -301,11 +438,20 @@ def _should_trigger_emergency_reset() -> bool:
     Returns:
         緊急リセットが必要な場合True
     """
+    if is_auto_restart_paused():
+        reason = get_auto_restart_pause_reason()
+        logger.debug(
+            "自動再起動ポーズ中のため緊急リセット判定をスキップ (%s)",
+            reason or "reason_unknown",
+        )
+        return False
     global _emergency_reset_time
     current_time = time.time()
+    if current_time - _last_adb_reset_seen < 30 or _is_any_host_waiting():
+        return False
     
     # 最後の緊急リセットから20分以内は実行しない（実用的な値）
-    if current_time - _emergency_reset_time < 1200:
+    if current_time - _emergency_reset_time < 1200 or _is_any_host_waiting():
         return False
     
     # 現在エラー状態のデバイス数を確認
@@ -351,6 +497,16 @@ def _emergency_reset_all_nox() -> None:
     
     全NOXプロセスを強制終了し、段階的に再起動します。
     """
+    if is_auto_restart_paused():
+        reason = get_auto_restart_pause_reason()
+        logger.warning(
+            "自動再起動ポーズ中のため緊急NOXリセットをスキップします (%s)",
+            reason or "reason_unknown",
+        )
+        return
+    if _is_any_host_waiting():
+        logger.warning("覇者ホスト待機中のため緊急NOXリセットをスキップします")
+        return
     try:
         logger.critical("🚨 緊急事態: 全NOXリセットを開始します")
         
@@ -415,6 +571,22 @@ def _force_terminate_all_nox() -> None:
         
     except Exception as e:
         logger.critical(f"● 全NOXプロセス強制終了中にエラー: {e}")
+
+
+def _run_silent_taskkill(command: str) -> None:
+    """taskkillコマンドを静かに実行するヘルパー。"""
+    try:
+        subprocess.run(
+            command,
+            shell=True,
+            capture_output=True,
+            timeout=15,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except Exception as exc:
+        logger.debug("taskkill実行エラー (%s): %s", command, exc)
 
 def _reset_all_device_states() -> None:
     """全デバイスの状態をリセットします。"""
@@ -584,6 +756,18 @@ def force_restart_nox_device(device_port: str, emergency: bool = False) -> bool:
     port_number = int(match.group(1))
     instance_number = port_number - 62024
     
+    if is_auto_restart_paused():
+        reason = get_auto_restart_pause_reason()
+        logger.debug(
+            "%s: 自動再起動ポーズ中のためNOX再起動をスキップ (%s)",
+            device_port,
+            reason or "reason_unknown",
+        )
+        return False
+    if _is_host_wait_mode(device_port) or _is_any_host_waiting():
+        logger.info("%s: 覇者ホスト待機中のためNOX再起動を抑止します", device_port)
+        return False
+
     # 再起動管理処理
     global _restart_in_progress, _last_restart_attempt, _device_in_error_state
     current_time = time.time()
@@ -657,9 +841,9 @@ def force_restart_nox_device(device_port: str, emergency: bool = False) -> bool:
         except Exception:
             pass
         
-        # 通常のtaskkillコマンドも実行
-        os.system(f'taskkill /F /FI "IMAGENAME eq Nox.exe" /FI "WINDOWTITLE eq Nox_{instance_number}"')
-        os.system(f'taskkill /F /FI "IMAGENAME eq NoxVMHandle.exe" /FI "WINDOWTITLE eq *{instance_number}"')
+        # 通常のtaskkillコマンドも実行（静かに）
+        _run_silent_taskkill(f'taskkill /F /FI "IMAGENAME eq Nox.exe" /FI "WINDOWTITLE eq Nox_{instance_number}"')
+        _run_silent_taskkill(f'taskkill /F /FI "IMAGENAME eq NoxVMHandle.exe" /FI "WINDOWTITLE eq *{instance_number}"')
         
         # 十分な待機時間
         time.sleep(10)
@@ -838,3 +1022,59 @@ def monitor_nox_health() -> None:
     except Exception as e:
         logger.error(f"NOXヘルスモニタリング中にエラー: {e}")
 
+
+def notify_adb_reset(ts: float | None = None) -> None:
+    global _last_adb_reset_seen
+    try:
+        _last_adb_reset_seen = float(ts if ts is not None else time.time())
+    except Exception:
+        _last_adb_reset_seen = time.time()
+
+
+def notify_virtual_machine_failure() -> None:
+    """NOX仮想マシン起動失敗を検知した際に呼び出し、全体リセットを実行する。"""
+    global _last_virtual_machine_failure
+    now = time.time()
+    if _is_any_host_waiting():
+        logger.warning("覇者ホスト待機中のため仮想マシン失敗リセットをスキップ")
+        return
+    if now - _last_virtual_machine_failure < 60:
+        return
+    _last_virtual_machine_failure = now
+    logger.warning("NOX仮想マシン起動失敗を検知。全NOXリセットを実行します。")
+    _emergency_reset_all_nox()
+
+
+def _freeze_monitor_loop() -> None:
+    while True:
+        time.sleep(_FREEZE_CHECK_INTERVAL)
+        now = time.time()
+        with _progress_lock:
+            tracked_ports = list(_last_progress_time.keys())
+            stale_ports = [
+                port for port, stamp in _last_progress_time.items()
+                if now - stamp >= _FREEZE_THRESHOLD
+            ]
+            for port in stale_ports:
+                _last_progress_time[port] = now
+        if tracked_ports and len(stale_ports) == len(tracked_ports):
+            global _last_global_stall_reset
+            if now - _last_global_stall_reset >= _GLOBAL_STALL_RESET_COOLDOWN:
+                logger.critical("全端末で10分以上進捗が無いため緊急NOXリセットを実行します")
+                _last_global_stall_reset = now
+                _emergency_reset_all_nox()
+                continue
+        for port in stale_ports:
+            if port in _restart_in_progress or _is_host_wait_mode(port):
+                continue
+            terminal = get_terminal_number(port)
+            logger.warning("%s: 10分以上進捗が無いためNOXを再起動します", terminal)
+            _queue_device_restart(port, restart_type="freeze_timeout")
+
+
+def _start_freeze_monitor() -> None:
+    thread = threading.Thread(target=_freeze_monitor_loop, name="FreezeMonitor", daemon=True)
+    thread.start()
+
+
+_start_freeze_monitor()

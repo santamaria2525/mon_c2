@@ -22,14 +22,24 @@ from .common import (
     logger,
 )
 
-def gui_run(main_functions: Dict[str, Callable]) -> None:
+def gui_run(main_functions: Dict[str, Callable], on_close: Optional[Callable[[], None]] = None) -> None:
     """
     機能選択GUIを表示して実行（ボタン形式）
     
     Args:
         main_functions: 関数名と実行関数のディクショナリ
+        on_close: ウィンドウを閉じる際に呼び出すコールバック
     """
     result = {"selection": None}
+    close_invoked = {"value": False}
+
+    def _invoke_on_close():
+        if on_close and not close_invoked["value"]:
+            close_invoked["value"] = True
+            try:
+                on_close()
+            except Exception as exc:
+                logger.debug("Close handler failed: %s", exc)
     
     def show_dialog():
         nonlocal result
@@ -38,7 +48,7 @@ def gui_run(main_functions: Dict[str, Callable]) -> None:
         time.sleep(0.5)
         
         root = tk.Tk()
-        root.title("NOX自動化ツール - 機能選択")
+        root.title("MS Tools C2 - 機能選択")
         
         # ウィンドウクラス名を設定してタスクモニターと区別
         try:
@@ -160,6 +170,7 @@ def gui_run(main_functions: Dict[str, Callable]) -> None:
         
         def cancel():
             root.destroy()
+            _invoke_on_close()
 
         exit_btn = tk.Button(
             exit_frame,
@@ -187,50 +198,41 @@ def gui_run(main_functions: Dict[str, Callable]) -> None:
 
         # キーボードショートカット
         root.bind('<Escape>', lambda event: cancel())
+        root.protocol("WM_DELETE_WINDOW", cancel)
         
         # 最初のボタンにフォーカス
         root.focus_set()
         
         root.mainloop()
 
-    # UIスレッドで実行（タスクモニターとの競合を避けるため）
+    # UIを直接実行し、ユーザー操作で閉じられるまで待機
     try:
-        dialog_thread = threading.Thread(target=show_dialog, daemon=True)
-        dialog_thread.start()
-        dialog_thread.join(timeout=300)  # 5分でタイムアウト
-        
-        if dialog_thread.is_alive():
-            _safe_print("⚠️ GUI応答なし - 強制終了")
-            import sys
-            import ctypes
-            if hasattr(sys, 'frozen'):
-                # exe環境では強制的にダイアログを閉じる
-                try:
-                    ctypes.windll.user32.SendMessageW(0xFFFF, 0x0010, 0, 0)  # WM_CLOSE
-                except:
-                    pass
+        show_dialog()
     except Exception as e:
         _safe_print(f"⚠️ GUI起動エラー: {e}")
         # フォールバック: コンソール入力
-        if 'functions' in locals():
+        if main_functions:
             _safe_print("\n📋 利用可能な機能:")
-            for i, name in enumerate(functions.keys(), 1):
+            for i, name in enumerate(main_functions.keys(), 1):
                 _safe_print(f"{i}. {name}")
             
             try:
                 choice = input("\n機能を選択してください (番号): ")
                 if choice.isdigit():
-                    func_list = list(functions.keys())
+                    func_list = list(main_functions.keys())
                     idx = int(choice) - 1
                     if 0 <= idx < len(func_list):
                         selected_func = func_list[idx]
                         _safe_print(f"実行: {selected_func}")
-                        functions[selected_func]()
+                        main_functions[selected_func]()
             except KeyboardInterrupt:
                 _safe_print("\n操作がキャンセルされました")
             except Exception as console_error:
                 _safe_print(f"コンソール操作エラー: {console_error}")
-    
+    else:
+        if result["selection"] not in main_functions:
+            _invoke_on_close()
+
     # 選択された関数を実行
     if result["selection"] in main_functions:
         main_functions[result["selection"]]()

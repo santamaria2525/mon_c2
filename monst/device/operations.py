@@ -24,17 +24,16 @@ from PIL import Image
 import cv2
 import numpy as np
 
-import pytesseract
-
 from config import name_prefix
 from logging_util import logger, MultiDeviceLogger
 from login_operations import handle_screens
 from monst.adb import perform_action, send_key_event
 from monst.image import (
     tap_if_found, tap_until_found, type_folder_name, find_image_count,
-    read_orb_count, read_account_name, save_account_name_image, save_orb_count_image
+    read_orb_count, read_account_name, save_account_name_image, save_orb_count_image,
+    save_character_ownership_image, is_ocr_available
 )
-from utils.data_persistence import update_excel_data
+from utils.data_persistence import update_excel_data, update_orb_player_id
 
 from .navigation import home
 
@@ -83,114 +82,84 @@ def mon_initial(
     folder: str, 
     multi_logger: Optional[MultiDeviceLogger] = None
 ) -> None:
-    """初期設定処理を実行します。
-    
-    Args:
-        device_port: 対象デバイスのポート
-        folder: フォルダ名
-        multi_logger: マルチデバイスロガー（オプション）
-    """
-    pass
+    """旧mon6準拠の初期設定処理を実行する。"""
+    home(device_port, folder)
+
+    tap_until_found(device_port, "option.png", "key", "sonota.png", "key", "tap")
+    tap_until_found(device_port, "waku.png", "key", "option.png", "key", "tap")
+    time.sleep(1)
+
+    # サウンド設定などをすべてOFFにする
+    while not tap_if_found('stay', device_port, "op_end.png", "key"):
+        tap_if_found('swipe_up', device_port, "waku.png", "key")
+        time.sleep(1)
+        for _ in range(3):
+            tap_if_found('tap', device_port, "off.png", "key")
+
+    # ニックネーム変更画面まで戻る
+    while not tap_if_found('stay', device_port, "nicname.png", "key"):
+        tap_if_found('swipe_down', device_port, "waku.png", "key")
+        for _ in range(3):
+            tap_if_found('tap', device_port, "off.png", "key")
+
+    tap_until_found(device_port, "name_hen.png", "key", "name_ok.png", "key", "tap")
+    tap_until_found(device_port, "name_ok.png", "key", "name_ok2.png", "key", "tap")
+    tap_until_found(device_port, "zz_home.png", "key", "zz_home2.png", "key", "tap")
 
 def mission_get(
-    device_port: str, 
-    folder: str, 
+    device_port: str,
+    folder: str,
     multi_logger: Optional[MultiDeviceLogger] = None
 ) -> None:
-    """ミッション報酬取得処理を実行します
-    
-    タイトル後にm_missionを検知してクリックし、4つのm_mitatsuが表示されるまで
-    m_tassei、m_uke0、m_kakunin確認動作を繰り返します。
-    
-    Args:
-        device_port: 対象デバイスのポート番号
-        folder: 処理対象のフォルダ名
-        multi_logger: マルチデバイス用ロガー（オプション）
-        
-    Note:
-        mon6のmissionメニュー仕様に基づく実装。
-        タイトル画面後からm_missionを検知し、4つのm_mitatsu表示まで処理を継続。
-    """
-    
-    # タイトル後にm_missionを検知してクリック
-    tap_if_found('tap', device_port, "m_mission.png", "key")
-    
-    # ミッション画面が読み込まれるまで待機
-    time.sleep(2)
-    
-    # m_tujoが表示されるまで待機してからクリック
-    max_wait_attempts = 10
-    for _ in range(max_wait_attempts):
-        if tap_if_found('stay', device_port, "m_tujo.png", "key"):
-            tap_if_found('tap', device_port, "m_tujo.png", "key")
+    """セレクトメニュー用の簡易ミッション受取処理"""
+    # Step2: m_mission_bが見えるまでm_missionをタップ
+    for _ in range(40):
+        if tap_if_found('stay', device_port, "m_mission_b.png", "mission"):
             break
-        time.sleep(0.5)
-    
-    time.sleep(1)
-    
-    # 4つのm_mitatsuが表示されるまで繰り返し処理
-    while not find_image_count(device_port, "m_mitatsu.png", 4, 0.75, "key"):
-        # 画面ハンドリング
+        tap_if_found('tap', device_port, "m_mission.png", "mission")
         handle_screens(device_port, "mission")
-        
-        # m_tassei（達成）ボタンを押した場合の処理
-        tassei_clicked = tap_if_found('tap', device_port, "m_tassei.png", "mission")
-        
-        if tassei_clicked:
-            # m_tasseiクリック後、受け取りボタンをチェック
-            receive_button_found = False
-            
-            # 受け取りボタンをチェック
-            if tap_if_found('tap', device_port, "m_uke0.png", "key"):
-                receive_button_found = True
-            
-            # 5体用の特別処理
-            if tap_if_found('stay', device_port, "m_5tai.png", "key"):
-                if tap_if_found('tap', device_port, "m_uke0.png", "key"):
-                    receive_button_found = True
-            
-            # 複数対象のミッション処理
-            target_missions = ["m_3tai.png", "m_4tai.png", "m_6tai.png", "m_7tai.png", "m_8tai.png", "m_10tai.png"]
-            for target_img in target_missions:
-                if tap_if_found('stay', device_port, target_img, "key"):
-                    if tap_if_found('tap', device_port, "m_uke0.png", "key"):
-                        receive_button_found = True
-                    break
-            
-            # 受け取りボタンがない場合はm_closeを押す
-            if not receive_button_found:
-                tap_if_found('tap', device_port, "m_close.png", "key")
-        else:
-            # m_tasseiをクリックしていない場合の通常処理
-            # 各種受け取り動作
-            if tap_if_found('stay', device_port, "m_5tai.png", "key"):
-                tap_if_found('tap', device_port, "m_uke0.png", "key")
-            
-            # 複数対象のミッション処理
-            target_missions = ["m_3tai.png", "m_4tai.png", "m_6tai.png", "m_7tai.png", "m_8tai.png", "m_10tai.png"]
-            for target_img in target_missions:
-                if tap_if_found('stay', device_port, target_img, "key"):
-                    tap_if_found('tap', device_port, "m_uke0.png", "key")
-                    break
-            
-            # 通常時はm_closeを押す
-            tap_if_found('tap', device_port, "m_close.png", "key")
-        
-        # m_kakunin（確認）動作
-        tap_if_found('tap', device_port, "m_kakunin.png", "mission")
-        
-        # 特殊画面処理
-        if tap_if_found('stay', device_port, "m_stjoho.png", "key"):
-            tap_until_found(device_port, "m_mission_b.png", "key", "back.png", "key", "tap")
-        if tap_if_found('stay', device_port, "m_tokugacha.png", "key"):
-            tap_until_found(device_port, "m_mission.png", "key", "zz_home2.png", "key", "tap")
-            tap_until_found(device_port, "m_mission_b.png", "key", "m_mission.png", "key", "tap")
-        
-        # 画面スクロール
-        perform_action(device_port, 'swipe', 100, 400, 100, 500, duration=300)
-        
-        # 短時間待機
+        time.sleep(0.4)
+
+    # Step3: m_tujoを最低1度クリック
+    tujo_clicked = False
+    for _ in range(40):
+        if tap_if_found('stay', device_port, "m_tujo.png", "mission"):
+            tap_if_found('tap', device_port, "m_tujo.png", "mission")
+            time.sleep(0.5)
+            tap_if_found('tap', device_port, "m_tujo.png", "mission")
+            tujo_clicked = True
+            break
+        handle_screens(device_port, "mission")
+        time.sleep(0.4)
+    if not tujo_clicked:
+        logger.warning("%s: m_tujoを検出できませんでした", device_port)
+
+    # Step4: m_tujofin1個 + m_mitatsu3個が揃うまで受取処理を継続
+    while True:
+        mitatsu_ready = find_image_count(device_port, "m_mitatsu.png", 3, 0.8, "mission")
+        tujo_ready = tap_if_found('stay', device_port, "m_tujofin.png", "mission") or tap_if_found('stay', device_port, "m_tujofin2.png", "mission")
+        if mitatsu_ready and tujo_ready:
+            break
+        progressed = tap_if_found('tap', device_port, "ikkatu.png", "mission")
+        progressed = tap_if_found('tap', device_port, "m_ok.png", "mission") or progressed
+        if not progressed:
+            handle_screens(device_port, "mission")
+        time.sleep(0.4)
+
+    tap_if_found('tap', device_port, "zz_home.png", "key")
+
+
+def _wait_for_room_ready(device_port: str, timeout: float = 60.0) -> bool:
+    """roomアイコンを2回連続で検知したらログイン完了とみなす。"""
+    start = time.time()
+    while time.time() - start < timeout:
+        if tap_if_found('stay', device_port, "room.png", "key"):
+            time.sleep(1.5)
+            if tap_if_found('stay', device_port, "room.png", "key"):
+                return True
         time.sleep(0.5)
+    logger.warning("%s: roomを検知できずログイン確認に失敗", device_port)
+    return False
     
 
 def name_change(
@@ -275,6 +244,12 @@ def id_check(
                 logger.error(f"❌ ID確認Excel保存エラー: {e}", exc_info=True)
         else:
             logger.warning("⚠️ ID画像が取得できないため、Excel保存をスキップします")
+
+        if copied_id:
+            try:
+                update_orb_player_id("orb_data.xlsx", folder, copied_id)
+            except Exception as e:
+                logger.error(f"orbデータへのID追記に失敗しました: {e}")
         
         return "ID_CHECK_COMPLETED" if id_image_path else "ID_CHECK_FAILED"
         
@@ -442,6 +417,13 @@ def orb_count(
     # 画像を保存
     account_image_path = save_account_name_image(device_port, folder)
     orb_image_path = save_orb_count_image(device_port, folder)
+    character_ownership_image_path = save_character_ownership_image(device_port, folder)
+
+    if not is_ocr_available():
+        logger.warning("Tesseract OCR が利用できないためオーブ数の自動読み取りをスキップします。")
+        if multi_logger:
+            multi_logger.log_error(device_port, "Tesseract OCR not available")
+        return False
 
     # オーブ読み取り（最大10回試行）
     max_retries = 10
@@ -452,7 +434,16 @@ def orb_count(
             
             if orbs is not None:
                 # Excelに記録
-                excel_success = update_excel_data("orb_data.xlsx", folder, orbs, found_character, account_name, account_image_path, orb_image_path)
+                excel_success = update_excel_data(
+                    "orb_data.xlsx",
+                    folder,
+                    orbs,
+                    found_character,
+                    account_name,
+                    account_image_path,
+                    orb_image_path,
+                    character_ownership_image=character_ownership_image_path,
+                )
                 
                 if excel_success:
                     if multi_logger:
@@ -466,9 +457,6 @@ def orb_count(
                         time.sleep(2)
                     continue
                 
-        except pytesseract.TesseractNotFoundError:
-            logger.error("Tesseract OCRが見つかりません。インストールと設定を確認してください。")
-            return False
         except Exception:
             pass
         

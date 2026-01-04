@@ -20,7 +20,15 @@ from typing import Optional
 
 from logging_util import logger, setup_logger
 from memory_monitor import start_memory_monitoring, stop_memory_monitoring
-from utils import get_base_path, get_log_file_path, set_working_directory
+from utils import (
+    get_base_path,
+    get_log_file_path,
+    set_working_directory,
+    start_error_dialog_monitor,
+    start_watchdog_heartbeat,
+    stop_error_dialog_monitor,
+    stop_watchdog_heartbeat,
+)
 
 
 def install_global_exception_hook() -> None:
@@ -44,6 +52,8 @@ class ApplicationCore:
     def __init__(self) -> None:
         self.stop_event = threading.Event()
         self._monitor_preference: Optional[str] = None
+        self._shutdown_lock = threading.Lock()
+        self._shutdown_invoked = False
 
         self._setup_shutdown_handlers()
         install_global_exception_hook()
@@ -57,8 +67,7 @@ class ApplicationCore:
 
         def _shutdown(signum, _frame):
             logger.info("Shutdown signal (%s) received; stopping application.", signum)
-            self.stop_event.set()
-            stop_memory_monitoring()
+            self.shutdown(exit_code=0)
 
         try:
             signal.signal(signal.SIGINT, _shutdown)
@@ -70,14 +79,11 @@ class ApplicationCore:
         """Configure console I/O, working directory, logging, and monitoring."""
         self._configure_console_encoding()
         set_working_directory()
+        self._boost_process_priority()
 
         base_path = get_base_path()
-        if getattr(sys, "frozen", False):
-            log_base = base_path
-        else:
-            repo_root = os.path.dirname(base_path)
-            log_base = repo_root if os.path.isdir(repo_root) else base_path
-        log_file_path = get_log_file_path(base_dir=log_base)
+        # ログは実行ファイルと同じ階層（scripts/exe いずれも）に出力する
+        log_file_path = get_log_file_path(base_dir=base_path)
         setup_logger(log_file_path=log_file_path, level=logging.DEBUG)
 
         # Limit OpenCV threads to avoid oversubscription on multi-device runs.
@@ -99,6 +105,14 @@ class ApplicationCore:
             pass
 
         start_memory_monitoring()
+        try:
+            start_error_dialog_monitor()
+        except Exception as exc:
+            logger.debug("Failed to start error dialog monitor: %s", exc)
+        try:
+            start_watchdog_heartbeat()
+        except Exception as exc:
+            logger.debug("Failed to start watchdog heartbeat: %s", exc)
 
     def _configure_console_encoding(self) -> None:
         """Best-effort UTF-8 console fallback for bundled executables."""
@@ -140,6 +154,31 @@ class ApplicationCore:
             except Exception:
                 pass
 
+    def _boost_process_priority(self) -> None:
+        """Prefer thisツール（とNOX子プロセス）のCPUスケジューリングを優先させる."""
+        try:
+            import psutil  # type: ignore
+
+            proc = psutil.Process()
+            # Windows固有: HIGHで十分。REALTIMEはリスクが高いので避ける。
+            if hasattr(psutil, "HIGH_PRIORITY_CLASS"):
+                proc.nice(psutil.HIGH_PRIORITY_CLASS)  # type: ignore[arg-type]
+            # 全コアを使えるように設定（環境によっては既定で全コアだが明示）
+            try:
+                proc.cpu_affinity(list(range(os.cpu_count() or 1)))  # type: ignore[attr-defined]
+            except Exception:
+                pass
+        except Exception:
+            try:
+                # psutilが無い場合のフォールバック（Windows専用）
+                import ctypes
+
+                priority_high = 0x00000080  # HIGH_PRIORITY_CLASS
+                handle = ctypes.windll.kernel32.GetCurrentProcess()
+                ctypes.windll.kernel32.SetPriorityClass(handle, priority_high)
+            except Exception:
+                pass
+
             try:
                 wrapped = getattr(current_stream, "wrapped", None)
                 if wrapped is not None and base_stream is not None:
@@ -158,6 +197,32 @@ class ApplicationCore:
             ctypes.windll.kernel32.SetConsoleTitleW(title)
         except Exception:
             pass
+
+    def shutdown(self, exit_code: int = 0) -> None:
+        """Gracefully stop monitors and terminate the process."""
+        with self._shutdown_lock:
+            if self._shutdown_invoked:
+                return
+            self._shutdown_invoked = True
+
+        self.stop_event.set()
+        try:
+            stop_memory_monitoring()
+        except Exception:
+            pass
+        try:
+            stop_error_dialog_monitor()
+        except Exception:
+            pass
+        try:
+            stop_watchdog_heartbeat()
+        except Exception:
+            pass
+
+        try:
+            sys.exit(exit_code)
+        finally:
+            os._exit(exit_code)
 
     def handle_console_visibility(self, args: list[str]) -> None:
         """Minimise or hide the console according to CLI flags."""

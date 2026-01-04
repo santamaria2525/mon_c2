@@ -10,9 +10,9 @@ from __future__ import annotations
 import subprocess
 import threading
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Deque, Dict, List, Optional, Set, Tuple
 
 from config import get_config
 from logging_util import logger
@@ -31,6 +31,12 @@ class _State:
     cmd_error: Dict[str, int] = field(default_factory=lambda: defaultdict(int))
     last_error_time: Dict[str, float] = field(default_factory=lambda: defaultdict(float))
     device_errors: Dict[str, int] = field(default_factory=lambda: defaultdict(int))
+    # 直近エラー・再接続状態
+    error_lock: threading.Lock = field(default_factory=threading.Lock)
+    recent_adb_errors: Deque[float] = field(default_factory=deque)
+    reconnect_lock: threading.Lock = field(default_factory=threading.Lock)
+    reconnect_failures: Dict[str, int] = field(default_factory=lambda: defaultdict(int))
+    reconnect_restart_inflight: Set[str] = field(default_factory=set)
 
     # 並行制御セマフォ
     sem: threading.Semaphore | None = None
@@ -53,6 +59,50 @@ class _State:
 
 _state = _State()
 
+
+def _register_reconnect_failure(device_port: str) -> int:
+    """Track consecutive reconnect failures per device."""
+    with _state.reconnect_lock:
+        _state.reconnect_failures[device_port] += 1
+        return _state.reconnect_failures[device_port]
+
+
+def _reset_reconnect_state(device_port: str) -> None:
+    """Clear reconnect counters and pending restarts for the device."""
+    with _state.reconnect_lock:
+        _state.reconnect_failures.pop(device_port, None)
+        _state.reconnect_restart_inflight.discard(device_port)
+
+
+def _schedule_force_restart(device_port: str, failure_count: int) -> None:
+    """Schedule a background NOX restart when reconnect keeps failing."""
+    with _state.reconnect_lock:
+        if device_port in _state.reconnect_restart_inflight:
+            return
+        _state.reconnect_restart_inflight.add(device_port)
+
+    def _restart_worker() -> None:
+        try:
+            from monst.image.device_management import force_restart_nox_device
+
+            if force_restart_nox_device(device_port, emergency=True):
+                logger.warning(
+                    "Device %s force-restarted after %d reconnect failures",
+                    device_port,
+                    failure_count,
+                )
+        except Exception as exc:  # pragma: no cover - best effort recovery
+            logger.debug(
+                "Emergency restart for %s failed: %s",
+                device_port,
+                exc,
+            )
+        finally:
+            with _state.reconnect_lock:
+                _state.reconnect_restart_inflight.discard(device_port)
+
+    threading.Thread(target=_restart_worker, daemon=True).start()
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -66,6 +116,10 @@ _FATAL_EXIT_CODES = {
 }
 _ADB_RESET_BACKOFF = 8.0  # seconds
 _ADB_RESET_VERIFY_ATTEMPTS = 5
+_RECENT_ERROR_WINDOW = 30.0  # seconds
+_ADB_RESET_ERROR_THRESHOLD = 5
+_MAX_RECONNECT_ATTEMPTS = 3
+_RECONNECT_FAILURE_RESTART_THRESHOLD = 3
 
 APP_PACKAGE = "jp.co.mixi.monsterstrike"
 APP_ACTIVITY = "jp.co.mixi.monsterstrike.MonsterStrike"
@@ -262,6 +316,13 @@ def run_adb_command(
 
             # エラー: 自動復旧機構付きログ出力
             now = time.time()
+            with _state.error_lock:
+                _state.recent_adb_errors.append(now)
+                while (
+                    _state.recent_adb_errors
+                    and now - _state.recent_adb_errors[0] > _RECENT_ERROR_WINDOW
+                ):
+                    _state.recent_adb_errors.popleft()
             cnt = _state.cmd_error[key] = _state.cmd_error.get(key, 0) + 1
             raw_error = (err or out or "").strip()
             if not raw_error:
@@ -314,7 +375,6 @@ def run_adb_command(
                 time.sleep(0.5 * (attempt + 1))
                 continue
             return None  # リトライ回数超過
-
 
 def perform_action_enhanced(
     device_port: str,
@@ -394,6 +454,7 @@ def perform_action_enhanced(
     logger.error(f"[ULTRATHINK] 強化操作が{retry_count}回失敗しました ({action} {x},{y})")
     return False
 
+
 def perform_action(
     device_port: str,
     action: str,
@@ -444,6 +505,9 @@ def perform_action(
 def reset_adb_server(force: bool = False) -> bool:
     """ADBサーバーを再起動します。"""
     cfg = get_config()
+    if getattr(cfg, "skip_adb_reset", False) and not force:
+        logger.info("reset_adb_server: skip_adb_reset=True のためADBリセットを行いません")
+        return True
     if not cfg.NOX_ADB_PATH:
         logger.error("NOX_ADB_PATH not set in config.json")
         return False
@@ -451,9 +515,21 @@ def reset_adb_server(force: bool = False) -> bool:
     with _state.adb_reset_lock:
         now = time.time()
         elapsed = now - _state.last_adb_reset
-        if not force and elapsed < _ADB_RESET_BACKOFF:
-            logger.debug("ADB reset skipped due to throttle (%.2fs since last)", elapsed)
-            return True
+        if elapsed < max(2.0, _ADB_RESET_BACKOFF if not force else _ADB_RESET_BACKOFF / 2):
+            with _state.error_lock:
+                recent_error_count = len(_state.recent_adb_errors)
+            if not force:
+                if recent_error_count < _ADB_RESET_ERROR_THRESHOLD:
+                    logger.debug("ADB reset skipped due to throttle (%.2fs since last)", elapsed)
+                    return True
+                logger.warning(
+                    "ADB reset throttle bypassed (%d rapid errors within %.0fs)",
+                    recent_error_count,
+                    _RECENT_ERROR_WINDOW,
+                )
+            else:
+                logger.debug("ADB reset (forced) skipped due to rapid repeat (%.2fs since last)", elapsed)
+                return True
 
         logger.warning("Restarting ADB server%s", " (forced)" if force else "")
         kill_cmd = [cfg.NOX_ADB_PATH, "kill-server"]
@@ -466,6 +542,17 @@ def reset_adb_server(force: bool = False) -> bool:
             time.sleep(wait_seconds)
             if check_adb_server():
                 _state.last_adb_reset = time.time()
+                with _state.error_lock:
+                    _state.recent_adb_errors.clear()
+                with _state.reconnect_lock:
+                    _state.reconnect_failures.clear()
+                    _state.reconnect_restart_inflight.clear()
+                try:
+                    from monst.image.device_management import notify_adb_reset
+
+                    notify_adb_reset(_state.last_adb_reset)
+                except Exception:
+                    pass
                 logger.debug(
                     "ADB server restart confirmed after %.1fs",
                     time.time() - now,
@@ -506,26 +593,68 @@ def reconnect_device(device_port: str) -> bool:
         再接続成功時はTrue
     """
     cfg = get_config()
-    
-    # 1. 既存接続を切断
-    _run([cfg.NOX_ADB_PATH, "disconnect", device_port], timeout=5)
-    time.sleep(1)
-    
-    # 2. ADBサーバーの状態確認と必要に応じて再起動
-    if not check_adb_server():
-        logger.warning("ADB server not responding, restarting...")
-        reset_adb_server(force=True)
-    
-    # 3. デバイスに再接続
-    out, err, rc = _run([cfg.NOX_ADB_PATH, "connect", device_port], timeout=10)
-    if rc == 0 and out and ("connected" in out or "already connected" in out):
-        # 接続確認のため簡単なコマンドを実行
-        time.sleep(1)
-        if is_device_available(device_port):
-            logger.info("Device %s successfully reconnected and verified", device_port)
-            return True
-    
-    logger.error("Failed to reconnect device %s: %s", device_port, err or "Unknown error")
+    last_error = "Unknown error"
+
+    for attempt in range(1, _MAX_RECONNECT_ATTEMPTS + 1):
+        _run([cfg.NOX_ADB_PATH, "disconnect", device_port], timeout=5)
+        time.sleep(0.5)
+
+        if attempt > 1:
+            time.sleep(min(0.5 * attempt, 1.5))
+
+        if not check_adb_server():
+            logger.warning(
+                "ADB server not responding, restarting before reconnect (attempt %d/%d)",
+                attempt,
+                _MAX_RECONNECT_ATTEMPTS,
+            )
+            reset_adb_server(force=True)
+
+        out, err, rc = _run([cfg.NOX_ADB_PATH, "connect", device_port], timeout=10)
+        response = (out or err or "").strip()
+        normalized = response.lower()
+
+        if rc == 0 and ("connected" in normalized or "already connected" in normalized):
+            time.sleep(1)
+            if is_device_available(device_port):
+                logger.info("Device %s successfully reconnected and verified", device_port)
+                _reset_reconnect_state(device_port)
+                try:
+                    from monst.image.device_management import mark_device_recovered
+
+                    mark_device_recovered(device_port)
+                except Exception:
+                    pass
+                return True
+
+        last_error = response or "Unknown error"
+
+        if attempt < _MAX_RECONNECT_ATTEMPTS:
+            logger.warning(
+                "Reconnect attempt %d/%d failed for %s: %s",
+                attempt,
+                _MAX_RECONNECT_ATTEMPTS,
+                device_port,
+                last_error,
+            )
+            if attempt >= 2:
+                reset_adb_server(force=True)
+            time.sleep(min(1.0 * attempt, 3.0))
+
+    logger.error(
+        "Failed to reconnect device %s after %d attempts: %s",
+        device_port,
+        _MAX_RECONNECT_ATTEMPTS,
+        last_error,
+    )
+    failure_count = _register_reconnect_failure(device_port)
+    if failure_count >= _RECONNECT_FAILURE_RESTART_THRESHOLD:
+        logger.warning(
+            "Device %s failed to reconnect %d times; scheduling emulator restart",
+            device_port,
+            failure_count,
+        )
+        _schedule_force_restart(device_port, failure_count)
     return False
 
 def check_adb_server() -> bool:

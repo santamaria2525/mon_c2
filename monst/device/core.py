@@ -8,17 +8,15 @@ from __future__ import annotations
 
 from typing import Optional
 
-from config import (
-    get_config, on_save, on_mission, on_que, on_check, on_event, 
-    on_medal, on_gacha, on_count, on_sell, on_name, on_initial, on_id_check
-)
+import config as cfg
+from config import get_config
 from logging_util import logger, MultiDeviceLogger
 from login_operations import device_operation_login
 from monst.adb import pull_file_from_nox
 from utils.device_utils import get_terminal_number
 
 from .checks import icon_check
-from .events import event_do
+from .events import event_do, event4_menu_do
 from .exceptions import LoginError, GachaOperationError, SellOperationError
 from .gacha import mon_gacha_shinshun
 from .operations import medal_change, mon_initial, mission_get, name_change, mon_sell, orb_count, id_check
@@ -60,6 +58,21 @@ def device_operation_select(
         if not device_operation_login(device_port, folder, multi_logger, **login_kwargs):
             raise LoginError(f"ログイン失敗 (フォルダ：{folder})")
         
+        # 最新フラグを再読込（静的import更新漏れ対策）
+        on_que = int(getattr(cfg, 'on_que', 0))
+        on_event = int(getattr(cfg, 'on_event', 0))
+        on_medal = int(getattr(cfg, 'on_medal', 0))
+        on_mission = int(getattr(cfg, 'on_mission', 0))
+        on_sell = int(getattr(cfg, 'on_sell', 0))
+        on_initial = int(getattr(cfg, 'on_initial', 0))
+        on_name = int(getattr(cfg, 'on_name', 0))
+        on_gacha = int(getattr(cfg, 'on_gacha', 0))
+        on_check = int(getattr(cfg, 'on_check', 0))
+        on_count = int(getattr(cfg, 'on_count', 0))
+        on_save = int(getattr(cfg, 'on_save', 0))
+        on_id_check = int(getattr(cfg, 'on_id_check', 0))
+        logger.info(f"[FLAGS] on_event={on_event} on_que={on_que} on_medal={on_medal} on_mission={on_mission} on_sell={on_sell} on_initial={on_initial} on_name={on_name} on_gacha={on_gacha} on_check={on_check} on_count={on_count} on_save={on_save} on_id_check={on_id_check}")
+
         # ガチャボタン誤作動防止チェック
         from image_detection import tap_if_found
         if tap_if_found('tap', device_port, "gacha_shu.png", "login"):
@@ -100,6 +113,12 @@ def device_operation_select(
             except Exception as e:
                 operations_completed.append("FRIEND_STATUS_CHECK_ERROR")
             
+        elif on_event == 4:
+            if event4_menu_do(device_port, folder, multi_logger):
+                operations_completed.append("EVENT4")
+            else:
+                operations_completed.append("EVENT4_FAIL")
+
         if on_medal == 1:
             try:
                 medal_change(device_port, folder)
@@ -141,12 +160,15 @@ def device_operation_select(
                 gacha_limit = config.gacha_limit
                 continue_until_character = config.continue_until_character
                 found_character = mon_gacha_shinshun(device_port, folder, gacha_limit, multi_logger, continue_until_character=continue_until_character)
-                operations_completed.append(f"GACHA({found_character})")
+                if found_character:
+                    operations_completed.append("GACHA_SUCCESS")
+                else:
+                    operations_completed.append("GACHA_FAIL")
             except Exception as e:
                 operations_completed.append("GACHA_FAIL")
                 found_character = False
             
-        if on_check in [1, 2, 3]:
+        if on_check in [1, 2, 3, 4]:
             try:
                 icon_check(device_port, folder)
                 operations_completed.append("CHECK")

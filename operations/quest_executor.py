@@ -12,7 +12,7 @@ from typing import Dict, Optional
 from logging_util import MultiDeviceLogger, logger
 from monst.adb import perform_action
 from monst.device.exceptions import LoginError
-from monst.image import mon_swipe, tap_if_found
+from monst.image import mon_swipe, tap_if_found, find_image_on_device
 from monst.image.device_control import tap_until_found
 from monst.image.device_management import monitor_device_health
 from utils.device_utils import get_terminal_number
@@ -75,6 +75,14 @@ class QuestExecutor:
                 **login_kwargs,
             ):
                 raise LoginError(f"ログイン失敗 (folder={folder})")
+
+            if flag_on_que == 3:
+                if not self._run_quest_three(device_port):
+                    raise RuntimeError("クエスト3処理が完了しませんでした")
+                if multi_logger:
+                    multi_logger.log_success(device_port)
+                logger.info("%s: %s [QUEST_DONE]", get_terminal_number(device_port), folder)
+                return True
 
             self._prepare_battle(device_port, flag_on_que)
             self._wait_for_completion(device_port)
@@ -175,6 +183,173 @@ class QuestExecutor:
             tap_if_found("tap", device_port, "que_yes_re.png", "quest")
             tap_if_found("tap", device_port, "icon.png", "quest")
             mon_swipe(device_port)
+
+    # ------------------------------------------------------------------ #
+    # Quest type 3 (home/battle/free state machine)
+    # ------------------------------------------------------------------ #
+    def _run_quest_three(self, device_port: str) -> bool:
+        """Execute the stabilised quest-3 workflow."""
+        start_time = time.time()
+        timeout = 20 * 60  # generous safety margin
+
+        while time.time() - start_time < timeout:
+            if self._detect_quest_three_completion(device_port):
+                return True
+
+            state = self._get_quest_three_state(device_port)
+            if state == "home":
+                self._process_quest_three_home_state(device_port)
+            elif state == "battle":
+                self._process_quest_three_battle_state(device_port)
+            else:
+                self._process_quest_three_free_state(device_port)
+
+            time.sleep(0.3)
+
+        return False
+
+    def _detect_quest_three_completion(self, device_port: str) -> bool:
+        """Return True once any of the completion indicators are found."""
+        for image in ("que_end1.png", "que_end2.png", "que_end.png"):
+            if tap_if_found("tap", device_port, image, "quest"):
+                return True
+        return False
+
+    def _get_quest_three_state(self, device_port: str) -> str:
+        if tap_if_found("stay", device_port, "sutamina.png", "quest"):
+            return "home"
+        if tap_if_found("stay", device_port, "battle.png", "quest"):
+            return "battle"
+        return "free"
+
+    def _process_quest_three_home_state(self, device_port: str) -> None:
+        if tap_if_found("tap", device_port, "retry.png", "quest"):
+            return
+
+        if self._tap_home_priority_sequence(device_port):
+            return
+
+        if self._handle_event_entry(device_port):
+            return
+
+        if self._handle_event_black_scroll(device_port):
+            return
+
+        if self._handle_pgacha(device_port):
+            return
+
+        if self._handle_nabitoha_or_jogai(device_port):
+            return
+
+        if self._handle_suketto(device_port):
+            return
+
+        self._click_login_home(device_port)
+
+    def _process_quest_three_battle_state(self, device_port: str) -> None:
+        mon_swipe(device_port)
+        for image in ("que_ok.png", "que_yes.png", "que_yes_re.png"):
+            tap_if_found("tap", device_port, image, "quest")
+
+    def _process_quest_three_free_state(self, device_port: str) -> None:
+        if tap_if_found("tap", device_port, "que_end_ok.png", "quest"):
+            time.sleep(0.3)
+            return
+        self._click_login_home(device_port)
+
+    def _tap_home_priority_sequence(self, device_port: str) -> bool:
+        if tap_if_found("tap", device_port, "pue_shohi.png", "quest"):
+            return True
+
+        if self._tap_event_pue_images(device_port):
+            return True
+
+        targets = [
+            ("event_s.png", "quest"),
+            ("event_top.png", "quest"),
+            ("chosen.png", "quest"),
+            ("close.png", "quest"),
+            ("solo.png", "quest"),
+            ("kyara-waku.png", "quest"),
+            ("start.png", "quest"),
+            ("quest.png", "quest"),
+            ("quest_c.png", "quest"),
+            ("ok.png", "quest"),
+        ]
+        for image, folder in targets:
+            if tap_if_found("tap", device_port, image, folder):
+                return True
+        return False
+
+    def _handle_event_entry(self, device_port: str) -> bool:
+        if tap_if_found("tap", device_port, "event.png", "quest"):
+            return True
+
+        if tap_if_found("stay", device_port, "event_l.png", "quest"):
+            for _ in range(20):
+                perform_action(device_port, "swipe", 300, 320, 220, 320, duration=2000)
+                time.sleep(0.4)
+                if tap_if_found("tap", device_port, "event.png", "quest"):
+                    return True
+                if not tap_if_found("stay", device_port, "event_l.png", "quest"):
+                    break
+        return False
+
+    def _handle_event_black_scroll(self, device_port: str) -> bool:
+        if not tap_if_found("stay", device_port, "eventblack.png", "quest"):
+            return False
+
+        for _ in range(10):
+            perform_action(device_port, "swipe", 150, 500, 150, 300, duration=2000)
+            time.sleep(0.4)
+            if self._tap_event_pue_images(device_port):
+                return True
+        return False
+
+    def _tap_event_pue_images(self, device_port: str) -> bool:
+        if tap_if_found("tap", device_port, "pue_shohi.png", "quest"):
+            return True
+
+        for image in ("event_pue1.png", "event_pue2.png", "event_pue3.png", "event_pue.png"):
+            if tap_if_found("tap", device_port, image, "quest"):
+                return True
+        return False
+
+    def _handle_pgacha(self, device_port: str) -> bool:
+        try:
+            coords = find_image_on_device(device_port, "pgacha.png", "quest", threshold=0.8)
+        except Exception:
+            return False
+
+        if not coords or coords[0] is None or coords[1] is None:
+            return False
+
+        x, y = coords
+        perform_action(device_port, "tap", int(x), int(y) + 50, duration=150)
+        return True
+
+    def _handle_nabitoha_or_jogai(self, device_port: str) -> bool:
+        found = False
+        if tap_if_found("stay", device_port, "nabitoha.png", "puest"):
+            found = True
+        if tap_if_found("stay", device_port, "jogai.png", "puest"):
+            found = True
+        if not found:
+            return False
+
+        self._click_login_home(device_port)
+        return True
+
+    def _handle_suketto(self, device_port: str) -> bool:
+        if not tap_if_found("stay", device_port, "suketto.png", "quest"):
+            return False
+        perform_action(device_port, "tap", 200, 550, duration=200)
+        return True
+
+    def _click_login_home(self, device_port: str) -> None:
+        tap_if_found("tap", device_port, "zz_home.png", "login")
+        tap_if_found("tap", device_port, "zz_home2.png", "login")
+        perform_action(device_port, "tap", 40, 180, duration=150)
 
 
 __all__ = ["QuestExecutor"]

@@ -77,7 +77,7 @@ from .helpers import (
     write_account_folders,
 )
 
-MAX_PARALLEL_DEVICE_TASKS = 4  # Reduce simultaneous heavy tasks to ease PC load
+MAX_PARALLEL_DEVICE_TASKS = 8  # 端末8台を同時進行
 
 MACRO_MENU_WINDOW_TITLES = (
     "NOX自動化ツール - 機能選択",

@@ -9,19 +9,54 @@ from __future__ import annotations
 from typing import Optional
 import time
 import re
+import os
+import shutil
 
 import cv2
 import numpy as np
 import pytesseract
-import os
 
 from logging_util import logger
 from monst.adb import perform_action
 from .constants import TESSERACT_CMD_PATH
 from .core import get_device_screenshot, tap_if_found
+from pathlib import Path
 
-# Tesseractのパスを設定
-pytesseract.pytesseract.tesseract_cmd = TESSERACT_CMD_PATH
+_TESSERACT_AVAILABLE = False
+
+def _detect_tesseract_cmd() -> Optional[str]:
+    """複数の候補パスからTesseract実行ファイルを探す。"""
+    candidates = []
+
+    def _add_candidate(path: Optional[str]) -> None:
+        if path and path not in candidates:
+            candidates.append(path)
+
+    _add_candidate(TESSERACT_CMD_PATH)
+    _add_candidate(os.environ.get("TESSERACT_CMD_PATH"))
+
+    which_path = shutil.which("tesseract.exe") or shutil.which("tesseract")
+    _add_candidate(which_path)
+
+    local_tool = Path(__file__).resolve().parents[2] / "tools" / "Tesseract-OCR" / "tesseract.exe"
+    _add_candidate(str(local_tool))
+
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate):
+            return candidate
+    return None
+
+_DETECTED_TESSERACT = _detect_tesseract_cmd()
+if _DETECTED_TESSERACT:
+    pytesseract.pytesseract.tesseract_cmd = _DETECTED_TESSERACT
+    _TESSERACT_AVAILABLE = True
+    logger.info(f"Tesseract OCRを使用します: {_DETECTED_TESSERACT}")
+else:
+    logger.warning("Tesseract OCRが見つからないためOCR機能をスキップします。数値の自動読み取りは無効になります。")
+
+def is_ocr_available() -> bool:
+    """現在の環境でTesseract OCRが使用可能かを返す。"""
+    return _TESSERACT_AVAILABLE
 
 def _is_valid_account_name(text: str) -> bool:
     """3～4桁の数字パターンかチェックします。"""
@@ -59,6 +94,8 @@ def _optimal_ocr_preprocessing(image: np.ndarray, target_type: str = "text") -> 
 
 def _enhanced_ocr(image: np.ndarray, whitelist: str, target_type: str = "text") -> str:
     """OCR処理を実行します。"""
+    if not _TESSERACT_AVAILABLE:
+        return ""
     try:
         processed = _optimal_ocr_preprocessing(image, target_type)
         
@@ -121,6 +158,8 @@ def read_account_name(device_port: str) -> Optional[str]:
                 time.sleep(0.1)
         
         # フォールバック処理
+        if not _TESSERACT_AVAILABLE:
+            return None
         gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
         for thresh_val in [120, 150, 180]:
             _, thresh = cv2.threshold(gray_roi, thresh_val, 255, cv2.THRESH_BINARY)
@@ -173,6 +212,9 @@ def read_orb_count(device_port: str, folder_name: str) -> Optional[int]:
     # 絶対座標でROI設定：x:285,y:32からx:330,y:50
     roi = screenshot[32:50, 285:330]
 
+    if not _TESSERACT_AVAILABLE:
+        return None
+
     try:
         result = _enhanced_ocr(roi, "0123456789", "numbers")
         if result and result.isdigit():
@@ -201,8 +243,6 @@ def read_orb_count(device_port: str, folder_name: str) -> Optional[int]:
         
         return None
             
-    except pytesseract.TesseractNotFoundError:
-        logger.error("Tesseract OCRが見つかりません。インストールと設定を確認してください。")
     except Exception as e:
         logger.error(f"オーブ数読み取り中にエラー: {e}")
     

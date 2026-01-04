@@ -57,7 +57,19 @@ def get_image_path(image_name: str, *subfolders: str) -> str:
     # ファイルの存在確認と代替パス検索
     if not os.path.exists(image_path):
         # 新構造での検索を試行（売却フォルダを優先）
-        alternative_folders = ["sell", "ui", "login", "gacha", "quest", "mission", "medal", "event", "macro", "icons"]
+        alternative_folders = [
+            "sell",
+            "ui",
+            "login",
+            "gacha",
+            "quest",
+            "mission",
+            "medal",
+            "event",
+            "event4",
+            "macro",
+            "icons",
+        ]
         for folder in alternative_folders:
             alt_path = os.path.join(base_path, "gazo", folder, image_name)
             if os.path.exists(alt_path):
@@ -112,7 +124,19 @@ def get_image_path_for_windows(image_name: str, *subfolders: str) -> str:
     # ファイルの存在確認と代替パス検索
     if not os.path.exists(image_path):
         # 新構造での検索を試行（売却フォルダを優先）
-        alternative_folders = ["sell", "ui", "login", "gacha", "quest", "mission", "medal", "event", "macro", "icons"]
+        alternative_folders = [
+            "sell",
+            "ui",
+            "login",
+            "gacha",
+            "quest",
+            "mission",
+            "medal",
+            "event",
+            "event4",
+            "macro",
+            "icons",
+        ]
         for folder in alternative_folders:
             alt_path = os.path.join(base_path, "gazo", folder, image_name)
             if os.path.exists(alt_path):

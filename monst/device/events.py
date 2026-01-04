@@ -7,9 +7,11 @@ monst.device.events - Event operation functions.
 from __future__ import annotations
 
 import time
+import os
 from typing import Optional
 
 from logging_util import MultiDeviceLogger
+from monst.image.utils import get_image_path
 from monst.adb import perform_action
 from monst.image import tap_if_found, tap_until_found
 
@@ -289,3 +291,90 @@ def bakuage_roulette_do(
     except Exception as e:
         logger.error(f"デバイス {device_port}: 爆獲れルーレット処理中にエラー: {e}")
         return False
+
+def event4_menu_do(
+    device_port: str,
+    folder: str,
+    multi_logger: Optional[MultiDeviceLogger] = None,
+) -> bool:
+    """Handle the custom Event 4 menu flow."""
+    from logging_util import logger
+
+    logger.info(f"[EVENT4] Device {device_port}: start processing (folder={folder})")
+
+    # ev4_start.png だけを確実に検知する（event4_start.png は存在しない）
+    start_candidates = ("ev4_start.png",)
+    start_found = False
+    max_start_wait = 30  # seconds
+    start_poll_interval = 1.0
+    start_time = time.time()
+    attempt = 0
+
+    # 事前にパス存在を確認してログ出力（パス問題の切り分け用）
+    start_path = get_image_path("ev4_start.png", "event4")
+    if start_path:
+        exists = os.path.exists(start_path)
+        logger.info(f"[EVENT4] start image path: {start_path} (exists={exists})")
+
+    while time.time() - start_time < max_start_wait:
+        attempt += 1
+        found_this_round = False
+        for image in start_candidates:
+            # 強制リフレッシュで見落としを防ぐ（ログイン直後の重要検知）
+            if tap_if_found("tap", device_port, image, "event4", cache_time=0, threshold=0.70):
+                start_found = True
+                found_this_round = True
+                logger.info(f"[EVENT4] Device {device_port}: tapped start button {image}")
+                time.sleep(1.0)
+                break
+        if start_found:
+            break
+        logger.info(
+            f"[EVENT4] Device {device_port}: ev4_start polling attempt {attempt} -> found={found_this_round}"
+        )
+        time.sleep(start_poll_interval)
+
+    if not start_found:
+        logger.info(f"[EVENT4] Device {device_port}: start image missing, skip folder")
+        return True
+
+    action_sequence = [
+        ("ev4_2.png", "tap"),
+        ("ev4_3.png", "tap"),
+        ("ev4_4.png", "swipe_down"),
+        ("ev4_5.png", "tap"),
+        ("ev4_6.png", "tap"),
+        ("ev4_7.png", "tap"),
+        ("ev4_8.png", "tap"),
+        ("ev4_9.png", "swipe_down"),
+        ("ev4_start.png", "tap"),
+    ]
+    end_candidates = ("ev4_end.png",)
+
+    start_time = time.time()
+    max_duration = 180
+
+    while time.time() - start_time < max_duration:
+        for end_image in end_candidates:
+            if tap_if_found("tap", device_port, end_image, "event4"):
+                logger.info(f"[EVENT4] Device {device_port}: detected end image {end_image}")
+                return True
+
+        action_executed = False
+        for image_name, action in action_sequence:
+            if tap_if_found(action, device_port, image_name, "event4"):
+                action_executed = True
+                if image_name == "ev4_4.png":
+                    logger.info(f"[EVENT4] Device {device_port}: swipe-down action executed")
+                else:
+                    logger.debug(f"[EVENT4] Device {device_port}: handled {image_name}")
+                time.sleep(0.8)
+                break
+
+        if not action_executed:
+            logger.info(f"[EVENT4] Device {device_port}: fallback tap at safe position")
+            perform_action(device_port, "tap", 40, 180, duration=150)
+            time.sleep(1.0)
+
+    logger.warning(f"[EVENT4] Device {device_port}: timed out during menu processing")
+    return False

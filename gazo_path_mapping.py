@@ -376,10 +376,10 @@ GAZO_PATH_MAPPING = {
     "hoshi/hoshi_tama2.png": "gacha/hoshi_tama2.png",
     "end/gacharu.png": "gacha/gacharu.png",
     "end/empty.png": "deprecated/end/empty.png",
-    "end/shinshun_icon.png": "deprecated/end/shinshun_icon.png",
-    "end/shinshun_zenshin.png": "deprecated/end/shinshun_zenshin.png",
-    "end/syoji1.png": "deprecated/end/syoji1.png",
-    "end/syoji2.png": "deprecated/end/syoji2.png",
+    "end/shinshun_icon.png": "gacha_target/shinshun_icon.png",
+    "end/shinshun_zenshin.png": "gacha_target/shinshun_zenshin.png",
+    "end/syoji1.png": "gacha_target/syoji1.png",
+    "end/syoji2.png": "gacha_target/syoji2.png",
     "key/tama.png": "gacha/tama.png",
     "key/tama2.png": "gacha/tama2.png",
     "key/hoshi_tama.png": "gacha/hoshi_tama.png",
@@ -418,7 +418,7 @@ def get_legacy_folder_mapping(folder: str) -> str:
         "mon": "icons",     # monフォルダはiconsへ
         "new": "login",     # newフォルダはloginへ
         "del": "sell",      # delフォルダはsellへ（売却機能用）
-        "end": "deprecated", # endフォルダはdeprecatedへ
+        "end": "gacha_target", # endフォルダはgacha_targetへ
         "old": "deprecated", # oldフォルダはdeprecatedへ
     }
     return folder_mapping.get(folder, folder)

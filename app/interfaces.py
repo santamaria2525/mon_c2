@@ -119,4 +119,11 @@ class GUIInterface:
         from utils import gui_run  # lazy import to avoid tkinter on CLI runs
 
         functions = build_menu(self.operations)
-        gui_run(functions)
+        gui_run(functions, on_close=self._handle_gui_close)
+
+    def _handle_gui_close(self) -> None:
+        """Ensure the application shuts down when the GUI is closed."""
+        try:
+            self.core.shutdown(0)
+        except SystemExit:
+            raise

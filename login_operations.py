@@ -254,9 +254,18 @@ def _handle_all_buttons(device_port: str) -> bool:
     button_found = False
     
     try:
+        if _handle_obu_rewards(device_port):
+            return True
         # ガチャボタン誤作動防止（最優先）
         if _safe_tap_if_found('tap', device_port, "gacha_shu.png", "login"):
             _handle_gacha_prevention(device_port)
+            return True
+
+        if _safe_tap_if_found('stay', device_port, "nabitoha.png", "puest") or _safe_tap_if_found(
+            'stay', device_port, "jogai.png", "puest"
+        ):
+            _safe_tap_if_found('tap', device_port, "zz_home.png", "login")
+            time.sleep(WAIT_TIMES["tap_after"])
             return True
         
         # OKボタン系（ユーザー要求の核心）
@@ -391,6 +400,62 @@ def _safe_restart_app(device_port: str):
     except Exception:
         pass
 
+def _handle_obu_rewards(device_port: str) -> bool:
+    """obuclear/obu10系の報酬が表示された場合に確実に処理する。"""
+    try:
+        detection_targets = ("obu10.png", "obuclear.png")
+        has_reward = any(
+            _safe_tap_if_found('stay', device_port, target, folder)
+            for target in detection_targets
+            for folder in ("login", "ui", "key")
+        )
+        if not has_reward:
+            return False
+
+        logger.info(f"{get_terminal_number(device_port)}: obu10報酬を処理します")
+        reward_sequence = [
+            "obu10.png",
+            "obuclear.png",
+            "uketoru.png",
+            "uketoru2.png",
+            "yes.png",
+            "yes2.png",
+            "ok.png",
+            "ok2.png",
+            "close.png",
+        ]
+
+        start = time.time()
+        timeout = 25.0
+        handled = False
+
+        while time.time() - start < timeout:
+            tapped = False
+            for image_name in reward_sequence:
+                for folder in ("login", "ui", "key"):
+                    if _safe_tap_if_found('tap', device_port, image_name, folder):
+                        handled = True
+                        tapped = True
+                        time.sleep(WAIT_TIMES["tap_after"])
+                        break
+                if tapped:
+                    break
+
+            if not tapped:
+                lingering = any(
+                    _safe_tap_if_found('stay', device_port, target, folder)
+                    for target in detection_targets
+                    for folder in ("login", "ui", "key")
+                )
+                if not lingering:
+                    break
+                time.sleep(WAIT_TIMES["screen_load"])
+
+        if not handled:
+            logger.debug(f"{get_terminal_number(device_port)}: obu10報酬処理は必要ありませんでした")
+        return handled
+    except Exception:
+        return False
 
 # ========== 後方互換性の保証 ==========
 

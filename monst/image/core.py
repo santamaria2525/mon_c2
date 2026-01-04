@@ -7,6 +7,7 @@ monst.image.core - Core computer vision functionality.
 from __future__ import annotations
 
 import gc
+import hashlib
 import subprocess
 import threading
 import time
@@ -18,7 +19,12 @@ import numpy as np
 from config import NOX_ADB_PATH
 from logging_util import logger
 from .constants import MAX_SCREENSHOT_CACHE_AGE
-from .device_management import mark_device_error, mark_device_recovered, is_device_in_error_state
+from .device_management import (
+    mark_device_error,
+    mark_device_recovered,
+    is_device_in_error_state,
+    record_device_progress,
+)
 from .utils import get_image_path
 
 # テンプレート画像の簡易キャッシュ（プロセス内）
@@ -45,7 +51,14 @@ def _get_template_gray(path: str) -> Optional[np.ndarray]:
 # スクリーンショットキャッシュ
 _last_screenshot: Dict[str, np.ndarray] = {}
 _last_screenshot_time: Dict[str, float] = {}
+_last_screen_digest: Dict[str, str] = {}
 _screenshot_lock = threading.Lock()
+
+_device_state_lock = threading.Lock()
+_device_last_ok: Dict[str, float] = {}
+_device_last_fail: Dict[str, float] = {}
+_DEVICE_CHECK_INTERVAL = 2.0
+_DEVICE_FAILURE_BACKOFF = 8.0
 
 # 連続失敗追跡
 _consecutive_failures: Dict[str, int] = {}
@@ -58,193 +71,188 @@ RECOVERY_CHECK_INTERVAL = 120
 _memory_check_counter = 0
 MEMORY_CHECK_INTERVAL = 50  # 50回に1回メモリチェック
 
+def _ensure_device_ready(device_port: str, *, force_check: bool = False) -> bool:
+    """Best-effort confirmation that the target device responds to adb."""
+    now = time.time()
+    with _device_state_lock:
+        last_ok = _device_last_ok.get(device_port, 0.0)
+        if not force_check and last_ok and (now - last_ok) < _DEVICE_CHECK_INTERVAL:
+            return True
+        last_fail = _device_last_fail.get(device_port, 0.0)
+        if not force_check and last_fail and (now - last_fail) < _DEVICE_FAILURE_BACKOFF:
+            return False
+
+    try:
+        from monst.adb import reconnect_device, run_adb_command
+    except Exception as exc:  # pragma: no cover - should not happen
+        logger.debug("ADB helpers unavailable while checking %s: %s", device_port, exc)
+        return True
+
+    out = run_adb_command(["get-state"], device_port=device_port, timeout=6)
+    if out and "device" in out.lower():
+        with _device_state_lock:
+            _device_last_ok[device_port] = now
+            _device_last_fail.pop(device_port, None)
+        return True
+
+    reconnected = False
+    try:
+        reconnected = reconnect_device(device_port)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("Reconnect attempt for %s raised: %s", device_port, exc)
+
+    if reconnected:
+        with _device_state_lock:
+            _device_last_ok[device_port] = time.time()
+            _device_last_fail.pop(device_port, None)
+        return True
+
+    with _device_state_lock:
+        _device_last_fail[device_port] = now
+    logger.debug("Device %s not reachable via adb get-state", device_port)
+    return False
+
+
+
 def get_device_screenshot(
-    device_port: str, 
-    cache_time: float = 5.0,  # 2.0秒から5.0秒に延長（8端末対応）
+    device_port: str,
+    cache_time: float = 5.0,  # Extended to keep up with 8-device workflows
     force_refresh: bool = False
 ) -> Optional[np.ndarray]:
-    """デバイスからスクリーンショットを取得します。
-    
-    Args:
-        device_port: 対象デバイスのポート
-        cache_time: キャッシュの有効期間（秒）
-        force_refresh: 強制的に新しいスクリーンショットを取得するか
-        
-    Returns:
-        スクリーンショットの画像データ、取得失敗時はNone
-        
-    Example:
-        >>> screenshot = get_device_screenshot("127.0.0.1:62001")
-        >>> if screenshot is not None:
-        ...     print(f"Screenshot size: {screenshot.shape}")
-    """
+    """Return a screenshot for the requested device."""
     current_time = time.time()
-    
-    # エラー状態のデバイスの処理
+
+    # Devices flagged as unhealthy skip cache usage and force a refresh.
     if is_device_in_error_state(device_port) and not force_refresh:
-        # エラー状態からの回復を一定時間後に試みる
-        # RECOVERY_CHECK_INTERVAL時間経過後は強制的にリフレッシュ
-        if True:  # 簡略化：常に回復を試みる
-            # 強制的にリフレッシュ
-            force_refresh = True
-        else:
-            # 回復試行までは前回のキャッシュを使用（存在する場合）
-            if device_port in _last_screenshot:
-                return _last_screenshot[device_port]
-            return None
-    
-    # キャッシュの有効期限チェック
-    cache_valid = (
-        not force_refresh and 
-        device_port in _last_screenshot and 
-        current_time - _last_screenshot_time.get(device_port, 0) < min(cache_time, MAX_SCREENSHOT_CACHE_AGE)
-    )
-    
-    if cache_valid:
-        return _last_screenshot[device_port]
-    
-    # 新しいスクリーンショットの取得を試みる
+        force_refresh = True
+
+    cached_frame: Optional[np.ndarray] = None
+    cache_valid = False
+    with _screenshot_lock:
+        cached_frame = _last_screenshot.get(device_port)
+        cached_time = _last_screenshot_time.get(device_port, 0.0)
+        cache_valid = (
+            not force_refresh
+            and cached_frame is not None
+            and current_time - cached_time < min(cache_time, MAX_SCREENSHOT_CACHE_AGE)
+        )
+
+    if cache_valid and cached_frame is not None:
+        return cached_frame
+
+    if not _ensure_device_ready(device_port, force_check=force_refresh):
+        logger.debug("Skipping screenshot because %s is not ready", device_port)
+        return cached_frame
+
     try:
-        # デバイス接続確認（改良版）
-        devices_cmd = [NOX_ADB_PATH, "devices"]
-        try:
-            devices_output = subprocess.check_output(devices_cmd, stderr=subprocess.PIPE, timeout=8)
-            if device_port.encode() not in devices_output:
-                # デバイス再接続試行
-                reconnect_cmd = [NOX_ADB_PATH, "connect", device_port]
-                subprocess.run(reconnect_cmd, capture_output=True, timeout=5)
-                time.sleep(1)
-                # 再確認
-                devices_output = subprocess.check_output(devices_cmd, stderr=subprocess.PIPE, timeout=5)
-                if device_port.encode() not in devices_output:
-                    raise subprocess.SubprocessError(f"Device {device_port} not found after reconnect")
-        except subprocess.TimeoutExpired:
-            # ADBサーバーリセット
-            subprocess.run([NOX_ADB_PATH, "kill-server"], capture_output=True, timeout=3)
-            time.sleep(1)
-            subprocess.run([NOX_ADB_PATH, "start-server"], capture_output=True, timeout=5)
-            time.sleep(2)
-            devices_output = subprocess.check_output(devices_cmd, stderr=subprocess.PIPE, timeout=8)
-            if device_port.encode() not in devices_output:
-                raise subprocess.SubprocessError(f"Device {device_port} not found after ADB reset")
-        
-        # スクリーンショット取得（リトライ機能付き）
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                cmd = [NOX_ADB_PATH, "-s", device_port, "exec-out", "screencap", "-p"]
+                cmd = [NOX_ADB_PATH, '-s', device_port, 'exec-out', 'screencap', '-p']
                 screenshot_data = subprocess.check_output(cmd, stderr=subprocess.PIPE, timeout=30)
-                
+
                 if not screenshot_data:
                     if attempt < max_retries - 1:
                         time.sleep(0.5)
                         continue
-                    raise subprocess.SubprocessError("Empty screenshot data after retries")
-                
+                    raise subprocess.SubprocessError('Empty screenshot data after retries')
+
                 img_array = np.frombuffer(screenshot_data, np.uint8)
                 img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
-                
+
                 if img is None or img.size == 0:
                     if attempt < max_retries - 1:
                         time.sleep(0.5)
                         continue
-                    raise subprocess.SubprocessError("Failed to decode screenshot after retries")
-                
-                break  # 成功したらループを抜ける
-                
-            except subprocess.CalledProcessError as e:
+                    raise subprocess.SubprocessError('Failed to decode screenshot after retries')
+
+                break
+
+            except subprocess.CalledProcessError as exc:
                 if attempt < max_retries - 1:
                     time.sleep(0.5)
                     continue
-                raise subprocess.SubprocessError(f"Screenshot command failed: {e}")
+                raise subprocess.SubprocessError(f"Screenshot command failed: {exc}")
             except subprocess.TimeoutExpired:
                 if attempt < max_retries - 1:
                     time.sleep(1)
                     continue
-                raise subprocess.SubprocessError("Screenshot timeout after retries")
+                raise subprocess.SubprocessError('Screenshot timeout after retries')
 
-        # キャッシュ更新
+        frame_digest = hashlib.sha1(img.tobytes()).hexdigest()
+        progress_updated = False
         with _screenshot_lock:
+            previous_digest = _last_screen_digest.get(device_port)
             _last_screenshot[device_port] = img
             _last_screenshot_time[device_port] = current_time
+            _last_screen_digest[device_port] = frame_digest
+            progress_updated = previous_digest != frame_digest
 
-        # 正常に取得できたら連続失敗カウンターをリセット
+        if progress_updated:
+            record_device_progress(device_port)
+
         _consecutive_failures[device_port] = 0
-        
-        # メモリ管理: 定期的にガベージコレクションを実行
+
         global _memory_check_counter
         _memory_check_counter += 1
         if _memory_check_counter >= MEMORY_CHECK_INTERVAL:
             _memory_check_counter = 0
-            # 古いキャッシュを削除
             with _screenshot_lock:
                 current_time_check = time.time()
-                expired_devices = []
-                for device, last_time in _last_screenshot_time.items():
-                    if current_time_check - last_time > MAX_SCREENSHOT_CACHE_AGE * 2:  # 2倍の時間が経過
-                        expired_devices.append(device)
-                
+                expired_devices = [
+                    device
+                    for device, last_time in _last_screenshot_time.items()
+                    if current_time_check - last_time > MAX_SCREENSHOT_CACHE_AGE * 2
+                ]
+
                 for device in expired_devices:
-                    if device in _last_screenshot:
-                        del _last_screenshot[device]
-                    if device in _last_screenshot_time:
-                        del _last_screenshot_time[device]
-                        
-            # ガベージコレクション実行
+                    _last_screenshot.pop(device, None)
+                    _last_screenshot_time.pop(device, None)
+                    _last_screen_digest.pop(device, None)
+
             gc.collect()
-        
-        # 正常に取得できたら回復とマーク
+
         if is_device_in_error_state(device_port):
             mark_device_recovered(device_port)
-            
+
         return img
 
-    except (subprocess.TimeoutExpired, subprocess.CalledProcessError, subprocess.SubprocessError, FileNotFoundError, MemoryError, OSError) as e:
-        # 連続失敗カウンターを更新
+    except (subprocess.TimeoutExpired, subprocess.CalledProcessError, subprocess.SubprocessError, FileNotFoundError, MemoryError, OSError) as exc:
         _consecutive_failures[device_port] = _consecutive_failures.get(device_port, 0) + 1
         _last_failure_time[device_port] = current_time
-        
-        # エラーメッセージの改善（頻繁なログを抑制）
-        if "not found" in str(e).lower() or "after reconnect" in str(e).lower():
-            # デバイス接続失敗時はDEBUGレベルでログ出力（完全に抑制）
-            logger.debug(f"デバイス {device_port} への接続に失敗: {e}")
-        elif "timeout" in str(e).lower():
-            # タイムアウトエラーは20回に1回だけログ出力（さらに抑制）
-            if _consecutive_failures.get(device_port, 0) % 20 == 0:
-                logger.warning(f"スクリーンショット取得タイムアウト ({device_port}): 連続{_consecutive_failures.get(device_port, 0)}回")
-        elif "memory" in str(e).lower() or isinstance(e, MemoryError):
-            # メモリエラーは即座にログ出力し、緊急メモリ清理を実行
-            logger.error(f"メモリ不足エラー ({device_port}): {e}")
-            # 緊急メモリ清理
+
+        failure_count = _consecutive_failures[device_port]
+        message = str(exc).lower()
+
+        if 'not found' in message or 'after reconnect' in message:
+            logger.debug("Device %s connection failed: %s", device_port, exc)
+        elif 'timeout' in message:
+            if failure_count % 20 == 0:
+                logger.warning("Screenshot timeout (%s): consecutive=%s", device_port, failure_count)
+        elif 'memory' in message or isinstance(exc, MemoryError):
+            logger.error("Memory error on %s: %s", device_port, exc)
             with _screenshot_lock:
                 _last_screenshot.clear()
                 _last_screenshot_time.clear()
+                _last_screen_digest.clear()
+                _last_screen_digest.clear()
             gc.collect()
-        elif "empty" in str(e).lower() or "decode" in str(e).lower():
-            # データエラーは10回に1回だけログ出力（さらに抑制）
-            if _consecutive_failures.get(device_port, 0) % 10 == 0:
-                logger.warning(f"スクリーンショット取得エラー ({device_port}): {e}")
+        elif 'empty' in message or 'decode' in message:
+            if failure_count % 10 == 0:
+                logger.warning("Screenshot decode error (%s): %s", device_port, exc)
         else:
-            # その他のエラーは5回に1回だけログ出力（抑制）
-            if _consecutive_failures.get(device_port, 0) % 5 == 0:
-                logger.warning(f"スクリーンショット取得エラー ({device_port}): {e}")
-        
-        consecutive_count = _consecutive_failures[device_port]
-        
-        # 連続失敗が7回以上の場合は確実にエラーとして扱う
-        if consecutive_count >= 7:
-            error_msg = f"連続失敗{consecutive_count}回: {str(e)}"
-            mark_device_error(device_port, error_msg)
-        # 3分以内に5回失敗した場合もエラーとして扱う
-        elif consecutive_count >= 5:
+            if failure_count % 5 == 0:
+                logger.warning("Screenshot capture error (%s): %s", device_port, exc)
+
+        if failure_count >= 7:
+            mark_device_error(device_port, f"Consecutive failures {failure_count}: {exc}")
+        elif failure_count >= 5:
             first_failure_time = _last_failure_time.get(device_port, current_time)
-            if current_time - first_failure_time <= 180:  # 3分以内
-                error_msg = f"短時間内連続失敗{consecutive_count}回: {str(e)}"
-                mark_device_error(device_port, error_msg)
-        
-        # 前回のキャッシュがあれば使用
-        if device_port in _last_screenshot:
-            return _last_screenshot[device_port]
+            if current_time - first_failure_time <= 180:
+                mark_device_error(device_port, f"Burst failures {failure_count}: {exc}")
+
+        if cached_frame is not None:
+            return cached_frame
         return None
 
 def find_image_on_device_enhanced(

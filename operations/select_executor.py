@@ -1,20 +1,16 @@
-"""
-High-level select menu executor implemented on the cleaned codebase.
-
-既存のデバイス操作ライブラリを利用しつつ、オーケストレーション部分のみを軽量化する。
-"""
+"""High-level select menu executor for the cleaned codebase."""
 
 from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Dict, Optional, TYPE_CHECKING
 
-from image_detection import tap_if_found
+from monst.image import tap_if_found
 from logging_util import MultiDeviceLogger, logger
 from monst.adb import pull_file_from_nox
 from monst.device.checks import icon_check
-from monst.device.events import bakuage_roulette_do, event_do
+from monst.device.events import bakuage_roulette_do, event_do, event4_menu_do
 from monst.device.exceptions import GachaOperationError, LoginError, SellOperationError
 from monst.device.friends import friend_status_check
 from monst.device.gacha import mon_gacha_shinshun
@@ -22,8 +18,13 @@ from monst.device.operations import medal_change, mission_get, mon_initial, mon_
 from monst.image.device_management import monitor_device_health
 from utils.device_utils import get_terminal_number
 
-from domain import LoginWorkflow
-from .select_flow import SelectResult, build_default_workflow
+if TYPE_CHECKING:
+    # Local imports keep static analysers happy while developing from source.
+    from domain import LoginWorkflow
+    from .select_flow import SelectResult, build_default_workflow
+else:  # pragma: no cover - executed in packaged runtime (e.g. PyInstaller)
+    from mon_c2.domain import LoginWorkflow
+    from mon_c2.operations.select_flow import SelectResult, build_default_workflow
 
 
 @dataclass
@@ -126,11 +127,39 @@ class SelectExecutor:
 
             self._clear_gacha_dialogs(device_port)
 
+            logger.info(
+                "[SELECT] device=%s folder=%s flags=%s",
+                device_port,
+                folder,
+                flags,
+            )
+
             workflow = build_default_workflow(
                 lambda key: self._make_handler(key, state)
             )
             workflow_results = workflow.execute(flags)
             state.results = workflow_results
+
+            handled_keys = {result.key for result in workflow_results}
+
+            # どのフラグも漏れなく実行されるよう、未処理のキーを強制実行する
+            for key, value in flags.items():
+                if not value or key in handled_keys:
+                    continue
+                logger.warning(
+                    "[SELECT] %s=%s was not executed via workflow; forcing handler",
+                    key,
+                    value,
+                )
+                handler = self._make_handler(key, state)
+                try:
+                    forced_result = handler(flags)
+                except Exception as exc:  # pragma: no cover - best effort fallback
+                    logger.warning("Forced handler for %s failed: %s", key, exc)
+                    forced_result = SelectResult(key, False, f"{key.upper()}_ERROR")
+                workflow_results.append(forced_result)
+                handled_keys.add(key)
+                state.results = workflow_results
 
             for result in workflow_results:
                 if result.details:
@@ -206,6 +235,7 @@ class SelectExecutor:
 
     def _handle_event(self, state: _SelectState, flags: Dict[str, int]) -> SelectResult:
         mode = int(flags.get("on_event", 0))
+        logger.info("[EVENT] device=%s folder=%s on_event=%s", state.device_port, state.folder, mode)
         try:
             if mode == 1:
                 success = bool(event_do(state.device_port, state.folder))
@@ -226,6 +256,9 @@ class SelectExecutor:
                     success,
                     "FRIEND_STATUS_CHECK" if success else "FRIEND_STATUS_CHECK_FAIL",
                 )
+            if mode == 4:
+                success = bool(event4_menu_do(state.device_port, state.folder, state.multi_logger))
+                return SelectResult("on_event", success, "EVENT4" if success else "EVENT4_FAIL")
         except Exception as exc:  # noqa: BLE001
             logger.warning("イベント処理失敗: %s", exc)
             return SelectResult("on_event", False, "EVENT_ERROR")
@@ -266,8 +299,9 @@ class SelectExecutor:
                 state.multi_logger,
                 continue_until_character=continue_until_character,
             )
-            label = f"GACHA({state.found_character})"
-            return SelectResult("on_gacha", True, label)
+            success = bool(state.found_character)
+            label = "GACHA_SUCCESS" if success else "GACHA_FAIL"
+            return SelectResult("on_gacha", success, label)
         except Exception as exc:  # noqa: BLE001
             logger.warning("ガチャ処理失敗: %s", exc)
             state.found_character = False

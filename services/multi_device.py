@@ -78,5 +78,5 @@ class MultiDeviceService:
             custom_args=custom_args,
         )
 
-    def remove_all_nox(self) -> None:
-        remove_all_nox()
+    def remove_all_nox(self, ports: Sequence[str]) -> None:
+        remove_all_nox(list(ports))

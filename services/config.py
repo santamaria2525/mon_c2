@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Dict, List
 
 import config as legacy_config  # type: ignore[import]
+from logging_util import logger
 
 
 @dataclass(frozen=True)
@@ -29,7 +30,22 @@ class ConfigService:
     """Helper facade around ``mon_c2.config`` for runtime access."""
 
     def load(self) -> ConfigSnapshot:
-        cfg = legacy_config.load_config()
+        # 毎回確実に最新の config.json を反映させるため強制リロード
+        cfg = legacy_config.reload_config()
+        logger.info("ConfigService.load: flags=%s", {
+            "on_que": getattr(cfg, "on_que", None),
+            "on_event": getattr(cfg, "on_event", None),
+            "on_medal": getattr(cfg, "on_medal", None),
+            "on_mission": getattr(cfg, "on_mission", None),
+            "on_sell": getattr(cfg, "on_sell", None),
+            "on_initial": getattr(cfg, "on_initial", None),
+            "on_name": getattr(cfg, "on_name", None),
+            "on_gacha": getattr(cfg, "on_gacha", None),
+            "on_check": getattr(cfg, "on_check", None),
+            "on_count": getattr(cfg, "on_count", None),
+            "on_save": getattr(cfg, "on_save", None),
+            "on_id_check": getattr(cfg, "on_id_check", None),
+        })
 
         select_flags = {
             "on_que": int(getattr(cfg, "on_que", 0)),

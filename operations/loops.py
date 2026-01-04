@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import concurrent.futures
+import os
+import threading
 import time
 from typing import Callable, List, Optional, Sequence, Tuple
 
@@ -15,6 +17,7 @@ from utils import close_adb_error_dialogs, close_nox_error_dialogs, display_mess
 
 from config import MAX_FOLDER_LIMIT
 from domain import LoginWorkflow
+from .auto_resume import LoginLoopAutoResumer
 from .helpers import apply_select_configuration, cleanup_macro_windows
 from .quest_executor import QuestExecutor
 from services import ConfigService, ConfigSnapshot, MultiDeviceService
@@ -76,8 +79,37 @@ class _BaseLoop:
             pass
         raise SystemExit(0)
 
+    def _log_execution_banner(self, menu_label: str, folder_value: Optional[int]) -> None:
+        """ログ/コンソールに開始メニューとフォルダを記録する。"""
+        if folder_value is None:
+            return
+        try:
+            folder_int = int(folder_value)
+        except Exception:
+            return
+        logger.info("メニュー: %s | フォルダ_%03d 作業開始", menu_label, folder_int)
 
-MAX_PARALLEL_DEVICE_TASKS = 4
+    def _close_console_and_exit(self) -> None:
+        """Close the console window and terminate the process."""
+        try:
+            import ctypes
+
+            hwnd = ctypes.windll.kernel32.GetConsoleWindow()
+            if hwnd:
+                ctypes.windll.user32.PostMessageW(hwnd, 0x0010, 0, 0)
+                time.sleep(0.2)
+        except Exception:
+            pass
+
+        try:
+            self.core.stop_event.set()
+        except Exception:
+            pass
+
+        os._exit(0)
+
+
+MAX_PARALLEL_DEVICE_TASKS = 8
 
 
 class LoginLoopRunner(_BaseLoop):
@@ -99,8 +131,20 @@ class LoginLoopRunner(_BaseLoop):
             on_ports_resolved=on_ports_resolved,
         )
         self.login_workflow = login_workflow
+        self._state_lock = threading.Lock()
+        self._is_running = False
+        self._auto_resumer = LoginLoopAutoResumer(self)
+
+    def is_running(self) -> bool:
+        with self._state_lock:
+            return self._is_running
+
+    def _set_running(self, value: bool) -> None:
+        with self._state_lock:
+            self._is_running = value
 
     def run(self, start_folder: Optional[int] = None, *, auto_mode: bool = False) -> None:
+        self._auto_resumer.update_context(ports=[], resume_folder=None)
         snapshot, ports = self._load_config_and_ports()
         if not snapshot or not ports:
             return
@@ -112,6 +156,7 @@ class LoginLoopRunner(_BaseLoop):
 
         if not self._guard_folder_limit(base_folder):
             return
+        self._log_execution_banner("ログインループ", base_folder)
 
         closed = cleanup_macro_windows()
         if closed:
@@ -134,24 +179,43 @@ class LoginLoopRunner(_BaseLoop):
         if auto_mode:
             logger.debug("Auto mode active: home_early=True")
 
-        next_folder, should_stop = self.multi_device_service.run_loop(
-            base_folder,
-            self.login_workflow.execute,
-            ports,
-            "Login",
-            custom_args=custom_args,
-            use_independent_processing=snapshot.use_independent_processing,
-        )
+        next_folder: Optional[int] = None
+        should_stop = False
+        resume_folder = base_folder
+
+        self._set_running(True)
+        self._auto_resumer.update_context(ports=ports, resume_folder=base_folder)
+        self._auto_resumer.mark_activity()
+
+        try:
+            next_folder, should_stop = self.multi_device_service.run_loop(
+                base_folder,
+                self.login_workflow.execute,
+                ports,
+                "Login",
+                custom_args=custom_args,
+                use_independent_processing=snapshot.use_independent_processing,
+            )
+            if next_folder:
+                resume_folder = next_folder
+        finally:
+            self._set_running(False)
+            self._auto_resumer.mark_activity()
+            if not should_stop and next_folder is not None:
+                self._auto_resumer.update_context(ports=ports, resume_folder=resume_folder)
+            else:
+                self._auto_resumer.update_context(ports=[], resume_folder=None)
 
         if should_stop:
-            stop_reason = "no_data" if next_folder is None else None
-            cutoff_folder = next_folder if next_folder is not None else max(base_folder, MAX_FOLDER_LIMIT)
-            self._handle_folder_limit_exceeded(cutoff_folder, reason=stop_reason)
+            logger.info("Login loop completed all folders. Shutting down.")
+            self._close_console_and_exit()
+            return
 
         if next_folder:
             logger.debug("Next folder candidate: %03d", next_folder)
 
     def run_continuous(self) -> None:
+        self._auto_resumer.update_context(ports=[], resume_folder=None)
         snapshot, ports = self._load_config_and_ports()
         if not snapshot or not ports:
             return
@@ -169,6 +233,7 @@ class LoginLoopRunner(_BaseLoop):
 
         if not self._guard_folder_limit(base_folder):
             return
+        self._log_execution_banner("ログインループ(連続)", base_folder)
 
         logger.debug("Continuous login loop start: folder %03d / ports %s", base_folder, ports)
         reset_adb_server()
@@ -179,7 +244,7 @@ class LoginLoopRunner(_BaseLoop):
                 operation=self.login_workflow.execute,
                 ports=ports,
                 operation_name="Login loop (8-device continuous)",
-                custom_args=None,
+                custom_args={"home_early": True},
             )
         except Exception as exc:
             logger.error("Eight-device loop error: %s", exc)
@@ -222,6 +287,8 @@ class OneSetRunner(_BaseLoop):
         closed = cleanup_macro_windows()
         if closed:
             logger.debug("Closed %d leftover macro windows", closed)
+        self._log_execution_banner("覇者2セット", base_folder)
+        self._log_execution_banner("1set書き込み", base_folder)
 
         logger.debug("1set書き込み処理開始: フォルダ%03d / ポート%s", base_folder, ports)
         reset_adb_server()
@@ -377,16 +444,18 @@ class SelectLoopRunner(_BaseLoop):
             room_key1=snapshot.room_key1,
             room_key2=snapshot.room_key2,
         )
-        logger.debug("Select flags: %s", snapshot.select_flags)
+        logger.info("Select flags (reloaded): %s", snapshot.select_flags)
 
         closed = cleanup_macro_windows()
         if closed:
             logger.debug("Closed %d leftover macro windows", closed)
+        self._log_execution_banner("セレクトループ", base_folder)
 
         try:
             close_nox_error_dialogs()
         except Exception as exc:  # pragma: no cover
             logger.debug("Failed to close NOX error dialogs: %s", exc)
+        self._log_execution_banner("クエストループ", base_folder)
 
         try:
             close_adb_error_dialogs()
@@ -409,7 +478,7 @@ class SelectLoopRunner(_BaseLoop):
             operation,
             ports,
             "Select",
-            custom_args={"home_early": True},
+            custom_args={"home_early": False},
             use_independent_processing=snapshot.use_independent_processing,
         )
 
