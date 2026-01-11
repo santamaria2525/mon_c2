@@ -219,8 +219,7 @@ def read_orb_count(device_port: str, folder_name: str) -> Optional[int]:
         result = _enhanced_ocr(roi, "0123456789", "numbers")
         if result and result.isdigit():
             orb_value = int(result)
-            if orb_value >= 1000:
-                return orb_value
+            return orb_value
         
         # フォールバック処理
         gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
@@ -233,9 +232,7 @@ def read_orb_count(device_port: str, folder_name: str) -> Optional[int]:
             result = pytesseract.image_to_string(enlarged_thresh, config='--psm 8 --oem 3 -c tessedit_char_whitelist=0123456789')
             number_only = ''.join(c for c in result if c.isdigit())
             if number_only and number_only.isdigit():
-                value = int(number_only)
-                if value >= 1000:
-                    valid_results.append(value)
+                valid_results.append(int(number_only))
         
         if valid_results:
             sorted_results = sorted(valid_results)

@@ -17,7 +17,17 @@ import pyautogui
 from logging_util import logger
 from .utils import get_image_path_for_windows
 
-def find_image_on_windows(image_path: str, confidence: float = 0.5) -> Optional[Tuple[int, int]]:
+
+class WindowsActionAbort(RuntimeError):
+    """Raised when Windows UI automation should abort (e.g. PyAutoGUI failsafe)."""
+
+
+def find_image_on_windows(
+    image_path: str,
+    confidence: float = 0.5,
+    *,
+    log: bool = True,
+) -> Optional[Tuple[int, int]]:
     """Windows画面上で画像を検索します。
     
     Args:
@@ -57,19 +67,27 @@ def find_image_on_windows(image_path: str, confidence: float = 0.5) -> Optional[
         if max_val >= confidence:
             center_x = max_loc[0] + template.shape[1] // 2
             center_y = max_loc[1] + template.shape[0] // 2
-            logger.debug(f"Windows画像検索成功: {image_path} 座標({center_x}, {center_y}) 信頼度={max_val:.3f}")
+            if log:
+                logger.debug(
+                    f"Windows画像検索成功: {image_path} 座標({center_x}, {center_y}) 信頼度={max_val:.3f}"
+                )
             return (center_x, center_y)
         else:
-            logger.debug(f"Windows画像検索失敗: {image_path} 信頼度={max_val:.3f} < 閾値={confidence}")
+            if log:
+                pass
+    except pyautogui.FailSafeException as exc:
+        logger.error("Windows画面操作を中断: PyAutoGUI failsafe (%s)", exc)
+        raise WindowsActionAbort("pyautogui failsafe") from exc
     except Exception as e:
         logger.error(f"Windows画面での画像検索中にエラー: {e}")
 
     return None
 
 def find_and_tap_image_on_windows(
-    image_name: str, 
-    *subfolders: str, 
-    confidence: float = 0.6
+    image_name: str,
+    *subfolders: str,
+    confidence: float = 0.6,
+    log: bool = True,
 ) -> Optional[Tuple[int, int]]:
     """Windows画面で画像を検索し、座標を返します。
     
@@ -114,20 +132,28 @@ def find_and_tap_image_on_windows(
         if max_val >= confidence:
             center_x = max_loc[0] + template.shape[1] // 2
             center_y = max_loc[1] + template.shape[0] // 2
-            logger.debug(f"Windows画像検索成功: {image_name} 座標({center_x}, {center_y}) 信頼度={max_val:.3f}")
+            if log:
+                logger.debug(
+                    f"Windows画像検索成功: {image_name} 座標({center_x}, {center_y}) 信頼度={max_val:.3f}"
+                )
             return (center_x, center_y)
         else:
-            logger.debug(f"Windows画像検索失敗: {image_name} 信頼度={max_val:.3f} < 閾値={confidence}")
+            if log:
+                pass
+    except pyautogui.FailSafeException as exc:
+        logger.error("Windows画面操作を中断: PyAutoGUI failsafe (%s)", exc)
+        raise WindowsActionAbort("pyautogui failsafe") from exc
     except Exception as e:
         logger.error(f"Windows画面での画像検索中にエラー: {e}")
 
     return None
 
 def tap_if_found_on_windows(
-    action: str, 
-    image_name: str, 
-    *subfolders: str, 
-    confidence: float = 0.6
+    action: str,
+    image_name: str,
+    *subfolders: str,
+    confidence: float = 0.6,
+    log: bool = True,
 ) -> bool:
     """Windows画面で画像を検索し、見つかった場合にアクションを実行します。
     
@@ -150,7 +176,12 @@ def tap_if_found_on_windows(
     time.sleep(0.1)
 
     # 画像を検索
-    coords = find_and_tap_image_on_windows(image_name, *subfolders, confidence=confidence)
+    coords = find_and_tap_image_on_windows(
+        image_name,
+        *subfolders,
+        confidence=confidence,
+        log=log,
+    )
 
     if coords is not None:
         x, y = coords
@@ -171,6 +202,9 @@ def tap_if_found_on_windows(
                 return False
             
             return True
+        except pyautogui.FailSafeException as exc:
+            logger.error("Windows画面操作を中断: PyAutoGUI failsafe (%s)", exc)
+            raise WindowsActionAbort("pyautogui failsafe") from exc
         except Exception as e:
             logger.error(f"Windows画面でのアクション実行中にエラー: {e}")
             return False
@@ -178,13 +212,14 @@ def tap_if_found_on_windows(
     return False
 
 def tap_until_found_on_windows(
-    target_image: str, 
+    target_image: str,
     target_subfolder: str,
-    action_image: str, 
-    action_subfolder: str, 
-    action: str = 'tap', 
+    action_image: str,
+    action_subfolder: str,
+    action: str = 'tap',
     target_action: str = 'stay',
-    timeout: int = 120
+    timeout: int = 120,
+    log: bool = True,
 ) -> bool:
     """Windows画面でターゲット画像が見つかるまでアクションを実行します。
     
@@ -211,16 +246,16 @@ def tap_until_found_on_windows(
     start_time = time.time()
 
     # 最初にターゲットが既に表示されているかチェック
-    if tap_if_found_on_windows(target_action, target_image, target_subfolder):
+    if tap_if_found_on_windows(target_action, target_image, target_subfolder, log=log):
         return True
 
     while time.time() - start_time < timeout:
         # ターゲット画像を再チェック
-        if tap_if_found_on_windows(target_action, target_image, target_subfolder):
+        if tap_if_found_on_windows(target_action, target_image, target_subfolder, log=log):
             return True
 
         # アクションを実行
-        tap_if_found_on_windows(action, action_image, action_subfolder)
+        tap_if_found_on_windows(action, action_image, action_subfolder, log=log)
 
         # 短い待機
         time.sleep(1)

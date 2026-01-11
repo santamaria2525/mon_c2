@@ -111,20 +111,28 @@ def _run_start_app_with_retry(start_app_path: str, label: str, wait_seconds: flo
 
 def _wait_for_load_button(start_app_path: str, label: str, *, timeout: float = 15.0, retry_wait: float = 5.0) -> None:
     """
-    load.png が表示されるまで監視し、一定時間見つからない場合は start_app.exe を再実行する。
+    load.png ????????????????????????? start_app.exe ???????
+    PyAutoGUI failsafe ??????????????
     """
     last_retry = time.time()
-    while not tap_if_found_on_windows("tap", "load.png", "macro"):
-        tap_if_found_on_windows("tap", "macro.png", "macro")
-        if tap_if_found_on_windows("stay", "koushin.png", "macro") or tap_if_found_on_windows(
-            "stay", "koshin.png", "macro"
-        ):
-            tap_if_found_on_windows("tap", "close.png", "macro")
+    while True:
+        try:
+            if tap_if_found_on_windows("tap", "load.png", "macro"):
+                return
+            tap_if_found_on_windows("tap", "macro.png", "macro")
+            if tap_if_found_on_windows("stay", "koushin.png", "macro") or tap_if_found_on_windows(
+                "stay", "koshin.png", "macro"
+            ):
+                tap_if_found_on_windows("tap", "close.png", "macro")
+        except WindowsActionAbort as exc:
+            logger.error("[HASYA] Windows?????????? start_app ?????????: %s", exc)
+            raise RuntimeError("Windows???????start_app???????") from exc
         time.sleep(0.5)
         if time.time() - last_retry >= timeout:
-            logger.warning("[HASYA] load.png が表示されないため start_app.exe を再実行します (%s)", label)
+            logger.warning("[HASYA] load.png ????????? start_app.exe ??????? (%s)", label)
             _run_start_app_with_retry(start_app_path, f"{label} retry", retry_wait)
             last_retry = time.time()
+
 
 def continue_hasya():
     """

@@ -1,11 +1,11 @@
-"""Multi-device orchestration helpers for the cleaned codebase."""
+﻿"""Multi-device orchestration helpers for the cleaned codebase."""
 
 from __future__ import annotations
 
 from typing import Any, Callable, Iterable, Mapping, Optional, Sequence, Tuple
 
 from logging_util import logger
-from multi_device import (
+from mon_c2.multi_device import (
     remove_all_nox,
     run_loop,
     run_loop_enhanced,
@@ -69,6 +69,7 @@ class MultiDeviceService:
         operation_name: str,
         *,
         custom_args: Optional[Mapping[str, Any]] = None,
+        summary_label: Optional[str] = None,
     ) -> None:
         run_continuous_set_loop(
             base_folder=int(base_folder),
@@ -76,6 +77,7 @@ class MultiDeviceService:
             ports=list(ports),
             operation_name=operation_name,
             custom_args=custom_args,
+            summary_label=summary_label,
         )
 
     def remove_all_nox(self, ports: Sequence[str]) -> None:

@@ -1,4 +1,4 @@
-"""Helper utilities for the operations manager."""
+﻿"""Helper utilities for the operations manager."""
 
 from __future__ import annotations
 
@@ -11,27 +11,27 @@ from logging_util import logger
 # Lazy multi-device entry points
 # ---------------------------------------------------------------------------
 def run_push(*args: Any, **kwargs: Any):
-    from multi_device import run_push as _func
+    from mon_c2.multi_device import run_push as _func
     return _func(*args, **kwargs)
 
 
 def run_loop(*args: Any, **kwargs: Any):
-    from multi_device import run_loop as _func
+    from mon_c2.multi_device import run_loop as _func
     return _func(*args, **kwargs)
 
 
 def run_loop_enhanced(*args: Any, **kwargs: Any):
-    from multi_device import run_loop_enhanced as _func
+    from mon_c2.multi_device import run_loop_enhanced as _func
     return _func(*args, **kwargs)
 
 
 def remove_all_nox(*args: Any, **kwargs: Any):
-    from multi_device import remove_all_nox as _func
+    from mon_c2.multi_device import remove_all_nox as _func
     return _func(*args, **kwargs)
 
 
 def run_in_threads(*args: Any, **kwargs: Any):
-    from multi_device import run_in_threads as _func
+    from mon_c2.multi_device import run_in_threads as _func
     return _func(*args, **kwargs)
 
 

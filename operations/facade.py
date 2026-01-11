@@ -4,11 +4,9 @@
 from __future__ import annotations
 
 from functools import cached_property
-from typing import Optional
+from typing import Optional, TYPE_CHECKING, Any
 
 from logging_util import logger
-
-from app.operations.manager import OperationsManager as LegacyOperationsManager
 
 from domain import LoginWorkflow
 from . import loops
@@ -18,6 +16,12 @@ from .account_backup_executor import AccountBackupExecutor
 from .friend_registration_executor import FriendRegistrationExecutor
 from .shitei_click_executor import ShiteiClickExecutor
 from services import ConfigService, MultiDeviceService
+from .mm_tools import split_mm_folder as run_mm_split, batch_rename_mm_folder as run_mm_batch
+
+if TYPE_CHECKING:  # pragma: no cover
+    from app.operations.manager import OperationsManager as LegacyOperationsManager
+else:
+    LegacyOperationsManager = Any
 
 
 class OperationsFacade:
@@ -122,10 +126,10 @@ class OperationsFacade:
         self.macro_runner.run()
 
     def split_mm_folder(self) -> None:
-        self.legacy.mm_folder_split()
+        run_mm_split()
 
     def batch_rename_mm_folder(self) -> None:
-        self.legacy.mm_folder_batch_rename()
+        run_mm_batch()
 
     def run_friend_registration(self) -> None:
         self.friend_executor.run()
@@ -146,4 +150,11 @@ class OperationsFacade:
     @cached_property
     def legacy(self) -> LegacyOperationsManager:
         """Instantiate the legacy manager on demand for unported operations."""
-        return LegacyOperationsManager(self.core)
+        try:
+            from app.operations.manager import OperationsManager as _LegacyOperationsManager
+        except Exception as exc:  # pragma: no cover - logged for user
+            raise RuntimeError(
+                "Legacy OperationsManager could not be imported. "
+                "Please ensure app.operations.manager is syntactically valid."
+            ) from exc
+        return _LegacyOperationsManager(self.core)

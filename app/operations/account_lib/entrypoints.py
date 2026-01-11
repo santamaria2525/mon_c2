@@ -87,7 +87,7 @@ def main_friend_registration(self) -> None:
                         logger.warning(f"?? デバイス接続確認失敗: {port}")
 
                 if available_ports:
-                    from multi_device import run_push
+                    from mon_c2.multi_device import run_push
                     run_push(int(current_folder), available_ports)
                     logger.debug(f"? 初期アカウント切り替え完了: フォルダ{current_folder} (対象: {len(available_ports)}台)")
                     time.sleep(2)  # 初期切り替え完了待機
@@ -164,7 +164,7 @@ def main_friend_registration(self) -> None:
                                         logger.warning(f"?? フォルダ移行時デバイス接続確認失敗: {port}")
 
                                 if available_ports:
-                                    from multi_device import run_push
+                                    from mon_c2.multi_device import run_push
                                     run_push(int(current_folder), available_ports)
                                     logger.debug(f"? アカウント切り替え完了: フォルダ{current_folder} (対象: {len(available_ports)}台)")
                                     time.sleep(2)  # 切り替え完了待機
@@ -203,7 +203,7 @@ def main_friend_registration(self) -> None:
                                                 logger.warning(f"?? 強化検索時デバイス接続確認失敗: {port}")
 
                                         if available_ports:
-                                            from multi_device import run_push
+                                            from mon_c2.multi_device import run_push
                                             run_push(int(current_folder), available_ports)
                                             logger.debug(f"? 強化検索後アカウント切り替え完了: フォルダ{current_folder} (対象: {len(available_ports)}台)")
                                             time.sleep(2)
@@ -298,7 +298,7 @@ def main_friend_registration(self) -> None:
                                         logger.warning(f"?? エラー後デバイス接続確認失敗: {port}")
 
                                 if available_ports:
-                                    from multi_device import run_push
+                                    from mon_c2.multi_device import run_push
                                     run_push(int(current_folder), available_ports)
                                     logger.debug(f"? エラー後アカウント切り替え完了: フォルダ{current_folder} (対象: {len(available_ports)}台)")
                                     time.sleep(2)
@@ -335,7 +335,7 @@ def main_friend_registration(self) -> None:
                                                 logger.warning(f"?? エラー後強化検索時デバイス接続確認失敗: {port}")
 
                                         if available_ports:
-                                            from multi_device import run_push
+                                            from mon_c2.multi_device import run_push
                                             run_push(int(current_folder), available_ports)
                                             logger.debug(f"? エラー後強化検索アカウント切り替え完了: フォルダ{current_folder} (対象: {len(available_ports)}台)")
                                             time.sleep(2)

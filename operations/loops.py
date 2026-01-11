@@ -245,6 +245,7 @@ class LoginLoopRunner(_BaseLoop):
                 ports=ports,
                 operation_name="Login loop (8-device continuous)",
                 custom_args={"home_early": True},
+                summary_label="ログイン",
             )
         except Exception as exc:
             logger.error("Eight-device loop error: %s", exc)

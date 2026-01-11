@@ -17,6 +17,7 @@ from monst.device.hasya import (
 from utils.gui_dialogs import multi_press_enhanced
 from utils.set_processing import find_next_set_folders
 from monst.image import tap_if_found_on_windows
+from functools import partial
 from monst.image.device_management import pause_auto_restart, resume_auto_restart
 
 from services import MultiDeviceService
@@ -48,23 +49,30 @@ class HasyaExecutor:
                 logger.info("Hasya workflow start base=%03d ports=%s", current_base, ports)
                 self._prepare_memory()
 
-                if not self._write_bin(current_base, ports):
+                used_folders, used_ports = self._write_bin(current_base, ports)
+                if not used_folders or not used_ports:
                     logger.warning("初期BINが不足しているため Hasya 処理を終了します。")
                     self._restore_memory_defaults()
                     break
-                self._run_set(current_base, ports, set_number=1)
+                self._run_set(used_folders, used_ports, set_number=1)
 
-                second_base = current_base + device_count
-                if not self._write_bin(second_base, ports):
+                second_base = max(int(folder) for folder in used_folders) + 1
+                used_folders, used_ports = self._write_bin(second_base, ports)
+                if not used_folders or not used_ports:
                     logger.warning("2セット目のBINが不足しているため Hasya 処理を終了します。")
                     self._restore_memory_defaults()
                     break
-                self._run_set(second_base, ports, set_number=2)
+                try:
+                    second_base = int(used_folders[0])
+                except Exception:
+                    pass
+                self._run_set(used_folders, used_ports, set_number=2)
 
                 self._restore_memory_defaults()
                 logger.info("Hasya workflow finished base=%03d-%03d", current_base, second_base)
 
-                next_idx, next_folders = find_next_set_folders(second_base + device_count, device_count)
+                next_start = max(int(folder) for folder in used_folders) + 1
+                next_idx, next_folders = find_next_set_folders(next_start, device_count)
                 if not next_folders or len(next_folders) < device_count:
                     logger.info("次のフォルダセットが見つからないため終了します。")
                     break
@@ -82,10 +90,13 @@ class HasyaExecutor:
     # ------------------------------------------------------------------ #
     # Core steps
     # ------------------------------------------------------------------ #
-    def _run_set(self, set_base: int, ports: Sequence[str], *, set_number: int) -> None:
+    def _run_set(self, folders: Sequence[str], ports: Sequence[str], *, set_number: int) -> None:
+        if not folders or not ports:
+            logger.warning("Hasya set %d: no folders/ports to process", set_number)
+            return
+        set_base = int(folders[0])
         logger.debug("Hasya set %d: base=%03d", set_number, set_base)
-        folders = [f"{set_base + idx:03d}" for idx, _ in enumerate(ports)]
-        folder_range = self._format_folder_range(set_base, len(ports))
+        folder_range = self._format_folder_range_from_list(folders)
 
         # 1) Login & preparation
         prep_success = self._run_parallel(
@@ -176,16 +187,17 @@ class HasyaExecutor:
     # ------------------------------------------------------------------ #
     # Bin push wrapper
     # ------------------------------------------------------------------ #
-    def _write_bin(self, base_folder: int, ports: Sequence[str]) -> bool:
+    def _write_bin(self, base_folder: int, ports: Sequence[str]) -> tuple[List[str], List[str]]:
         try:
             next_base, used_folders = self.multi_device_service.run_push(base_folder, ports)
             if not used_folders:
                 logger.warning("Hasya BIN 書き込み対象が見つかりません: %03d", base_folder)
-                return False
+                return [], []
             if len(used_folders) < len(ports):
                 logger.warning(
                     "Hasya BIN 書き込み: %d 台中 %d 台のみ成功", len(ports), len(used_folders)
                 )
+            used_ports = list(ports)[: len(used_folders)]
             logger.debug(
                 "Hasya BIN 書き込み範囲: %03d-%03d",
                 base_folder,
@@ -193,9 +205,9 @@ class HasyaExecutor:
             )
         except Exception as exc:
             logger.error("Hasya BIN 書き込み失敗: %s", exc)
-            return False
+            return [], []
         time.sleep(3)
-        return True
+        return list(used_folders), used_ports
 
     # ------------------------------------------------------------------ #
     # Utility helpers
@@ -258,11 +270,14 @@ class HasyaExecutor:
     # ------------------------------------------------------------------ #
     # Logging helpers
     # ------------------------------------------------------------------ #
-    def _format_folder_range(self, base: int, count: int) -> str:
-        if count <= 0:
-            return f"{base:03d}-{base:03d}"
-        end = base + max(count - 1, 0)
-        return f"{base:03d}-{end:03d}"
+    def _format_folder_range_from_list(self, folders: Sequence[str]) -> str:
+        if not folders:
+            return "000-000"
+        try:
+            values = sorted(int(folder) for folder in folders)
+        except Exception:
+            values = [int(folders[0])]
+        return f"{values[0]:03d}-{values[-1]:03d}"
 
     def _log_hasya_phase(self, folder_range: str, phase_label: str, success: bool) -> None:
         label = folder_range or "フォルダ範囲不明"
@@ -273,3 +288,4 @@ class HasyaExecutor:
 
 
 __all__ = ["HasyaExecutor"]
+tap_if_found_on_windows = partial(tap_if_found_on_windows, log=False)

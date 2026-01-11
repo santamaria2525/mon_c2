@@ -24,6 +24,7 @@ from .device_management import (
     mark_device_recovered,
     is_device_in_error_state,
     record_device_progress,
+    note_black_screen,
 )
 from .utils import get_image_path
 
@@ -70,6 +71,25 @@ RECOVERY_CHECK_INTERVAL = 120
 # メモリ管理
 _memory_check_counter = 0
 MEMORY_CHECK_INTERVAL = 50  # 50回に1回メモリチェック
+
+
+def _handle_memory_pressure(device_port: str, exc: Exception) -> None:
+    """Clear caches and raise a runtime error for memory issues."""
+    logger.error("画像処理メモリ不足 (%s): %s", device_port, exc)
+    with _screenshot_lock:
+        _last_screenshot.pop(device_port, None)
+        _last_screenshot_time.pop(device_port, None)
+        _last_screen_digest.pop(device_port, None)
+    gc.collect()
+    mark_device_error(device_port, f"Image memory error: {exc}")
+    raise RuntimeError(f"image memory error ({device_port})") from exc
+
+
+def _raise_cv_error(device_port: str, context: str, exc: Exception) -> None:
+    """Convert cv2 errors into runtime errors for multi-device recovery."""
+    logger.error("cv2 error during %s (%s): %s", context, device_port, exc)
+    mark_device_error(device_port, f"cv2 error during {context}: {exc}")
+    raise RuntimeError(f"cv2 error during {context} ({device_port})") from exc
 
 def _ensure_device_ready(device_port: str, *, force_check: bool = False) -> bool:
     """Best-effort confirmation that the target device responds to adb."""
@@ -180,16 +200,16 @@ def get_device_screenshot(
                 raise subprocess.SubprocessError('Screenshot timeout after retries')
 
         frame_digest = hashlib.sha1(img.tobytes()).hexdigest()
-        progress_updated = False
         with _screenshot_lock:
-            previous_digest = _last_screen_digest.get(device_port)
             _last_screenshot[device_port] = img
             _last_screenshot_time[device_port] = current_time
             _last_screen_digest[device_port] = frame_digest
-            progress_updated = previous_digest != frame_digest
-
-        if progress_updated:
-            record_device_progress(device_port)
+        try:
+            note_black_screen(device_port, float(img.mean()))
+        except Exception:
+            pass
+        # Screenshot取得が成功している限り「進行中」とみなす
+        record_device_progress(device_port)
 
         _consecutive_failures[device_port] = 0
 
@@ -217,7 +237,13 @@ def get_device_screenshot(
 
         return img
 
-    except (subprocess.TimeoutExpired, subprocess.CalledProcessError, subprocess.SubprocessError, FileNotFoundError, MemoryError, OSError) as exc:
+    except MemoryError as exc:
+        _handle_memory_pressure(device_port, exc)
+    except cv2.error as exc:
+        if "Insufficient memory" in str(exc):
+            _handle_memory_pressure(device_port, exc)
+        _raise_cv_error(device_port, "screenshot decode", exc)
+    except (subprocess.TimeoutExpired, subprocess.CalledProcessError, subprocess.SubprocessError, FileNotFoundError, OSError) as exc:
         _consecutive_failures[device_port] = _consecutive_failures.get(device_port, 0) + 1
         _last_failure_time[device_port] = current_time
 
@@ -229,14 +255,8 @@ def get_device_screenshot(
         elif 'timeout' in message:
             if failure_count % 20 == 0:
                 logger.warning("Screenshot timeout (%s): consecutive=%s", device_port, failure_count)
-        elif 'memory' in message or isinstance(exc, MemoryError):
-            logger.error("Memory error on %s: %s", device_port, exc)
-            with _screenshot_lock:
-                _last_screenshot.clear()
-                _last_screenshot_time.clear()
-                _last_screen_digest.clear()
-                _last_screen_digest.clear()
-            gc.collect()
+        elif 'memory' in message:
+            _handle_memory_pressure(device_port, exc)
         elif 'empty' in message or 'decode' in message:
             if failure_count % 10 == 0:
                 logger.warning("Screenshot decode error (%s): %s", device_port, exc)
@@ -246,6 +266,7 @@ def get_device_screenshot(
 
         if failure_count >= 7:
             mark_device_error(device_port, f"Consecutive failures {failure_count}: {exc}")
+            raise RuntimeError(f"screenshot failure ({device_port})") from exc
         elif failure_count >= 5:
             first_failure_time = _last_failure_time.get(device_port, current_time)
             if current_time - first_failure_time <= 180:
@@ -411,76 +432,46 @@ def find_image_on_device(
     return None, None
 
 def find_and_tap_image(
-    device_port: str, 
-    image_name: str, 
+    device_port: str,
+    image_name: str,
     *subfolders: str,
-    cache_time: float = 2.0, 
-    threshold: float = 0.8
+    cache_time: float = 2.0,
+    threshold: float = 0.8,
 ) -> Tuple[Optional[int], Optional[int]]:
-    """画像を探し、見つかれば座標を返します。
-    
-    Args:
-        device_port: デバイスポート
-        image_name: 検索する画像のファイル名
-        subfolders: 画像を検索するサブフォルダパス
-        cache_time: キャッシュの有効期間（秒）
-        threshold: マッチングの閾値
-        
-    Returns:
-        座標タプル、見つからなければ(None, None)
-        
-    Example:
-        >>> x, y = find_and_tap_image("127.0.0.1:62001", "button.png", "ui")
-        >>> if x is not None and y is not None:
-        ...     # perform_action でタップ実行
-        ...     pass
-    """
+    """画像を探し、見つかれば座標を返します。"""
+    force_refresh = is_device_in_error_state(device_port)
+    eff_cache = cache_time
     try:
-        # スクリーンショット取得 - force_refreshフラグを追加
-        force_refresh = is_device_in_error_state(device_port)
-        eff_cache = cache_time
-        try:
-            if any(str(sf).lower() == 'login' for sf in subfolders):
-                eff_cache = min(cache_time, 0.5)
-        except Exception:
-            pass
-        screenshot = get_device_screenshot(device_port, eff_cache, force_refresh=force_refresh)
-        
-        if screenshot is None:
-            # エラーログを削除してDEBUGレベルに変更
-            logger.debug(f"スクリーンショット取得失敗: {device_port}")
-            return None, None
+        if any(str(sf).lower() == "login" for sf in subfolders):
+            eff_cache = min(cache_time, 0.5)
+    except Exception:
+        pass
 
-        # グレースケール変換
+    screenshot = get_device_screenshot(device_port, eff_cache, force_refresh=force_refresh)
+    if screenshot is None:
+        raise RuntimeError(f"screenshot unavailable ({device_port})")
+
+    try:
         gray_screenshot = cv2.cvtColor(screenshot, cv2.COLOR_BGR2GRAY)
-        
-        # テンプレート画像読み込み
-        target_image_path = get_image_path(image_name, *subfolders)
-        template = _get_template_gray(target_image_path)
+    except cv2.error as exc:
+        _raise_cv_error(device_port, "grayscale", exc)
 
-        if template is None:
-            logger.error(f"テンプレート画像が見つかりません: {target_image_path}")
-            return None, None
+    target_image_path = get_image_path(image_name, *subfolders)
+    template = _get_template_gray(target_image_path)
+    if template is None:
+        raise RuntimeError(f"template not found: {target_image_path}")
 
-        # テンプレートマッチング実行
-        try:
-            res = cv2.matchTemplate(gray_screenshot, template, cv2.TM_CCOEFF_NORMED)
-            _, max_val, _, max_loc = cv2.minMaxLoc(res)
+    try:
+        res = cv2.matchTemplate(gray_screenshot, template, cv2.TM_CCOEFF_NORMED)
+        _, max_val, _, max_loc = cv2.minMaxLoc(res)
+    except cv2.error as exc:
+        _raise_cv_error(device_port, f"template match ({image_name})", exc)
 
-            # マッチング閾値チェック
-            if max_val >= threshold:
-                # 中心座標を計算
-                center_x = max_loc[0] + (template.shape[1] // 2)
-                center_y = max_loc[1] + (template.shape[0] // 2)
-                return center_x, center_y
-        except Exception as match_err:
-            return None, None
+    if max_val >= threshold:
+        center_x = max_loc[0] + (template.shape[1] // 2)
+        center_y = max_loc[1] + (template.shape[0] // 2)
+        return center_x, center_y
 
-    except Exception as e:
-        logger.error(f"画像検索中にエラーが発生しました: {e}")
-        return None, None
-    
-    # 明示的にデフォルトの戻り値を返す
     return None, None
 
 def find_image_count(
@@ -606,27 +597,18 @@ def tap_if_found(
             return False
     
     # 画像検索 - 安全なタプルアンパック
-    try:
-        result = find_and_tap_image(device_port, image_name, *subfolders, cache_time=cache_time, threshold=threshold)
-        # 確実にタプルを取得
+    result = find_and_tap_image(device_port, image_name, *subfolders, cache_time=cache_time, threshold=threshold)
+    if result is not None and len(result) == 2:
+        x, y = result
+    else:
+        x, y = None, None
+
+    # 見つからなかった場合、キャッシュを使わずに再試行
+    if x is None and y is None and cache_time > 0:
+        result = find_and_tap_image(device_port, image_name, *subfolders, cache_time=0, threshold=threshold)
         if result is not None and len(result) == 2:
             x, y = result
         else:
-            x, y = None, None
-    except Exception as unpack_error:
-        logger.error(f"画像検索結果のアンパックエラー: {unpack_error}")
-        x, y = None, None
-    
-    # 見つからなかった場合、キャッシュを使わずに再試行
-    if x is None and y is None and cache_time > 0:
-        try:
-            result = find_and_tap_image(device_port, image_name, *subfolders, cache_time=0, threshold=threshold)
-            if result is not None and len(result) == 2:
-                x, y = result
-            else:
-                x, y = None, None
-        except Exception as unpack_error:
-            logger.error(f"再試行時のアンパックエラー: {unpack_error}")
             x, y = None, None
     
     if x is not None and y is not None:
@@ -653,6 +635,7 @@ def tap_if_found(
             if result:
                 if device_port in _last_screenshot:
                     del _last_screenshot[device_port]
+                record_device_progress(device_port)
                 return True
             else:
                 logger.warning(f"アクション '{action}' の実行に失敗: デバイス {device_port}")
@@ -660,6 +643,6 @@ def tap_if_found(
                 
         except Exception as e:
             logger.error(f"アクション実行中にエラー: {e}")
-            return False
+            raise
 
     return False

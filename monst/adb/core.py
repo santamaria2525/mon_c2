@@ -17,6 +17,27 @@ from typing import Deque, Dict, List, Optional, Set, Tuple
 from config import get_config
 from logging_util import logger
 
+try:
+    from monst.image.device_management import record_device_progress as _record_device_progress_fn
+except Exception:  # ImportError or circular load during PyInstaller bootstrap
+    _record_device_progress_fn = None
+
+
+def _mark_progress(device_port: str) -> None:
+    """更新イベントを監視し、端末ごとの進行状況を最新化する。"""
+    global _record_device_progress_fn
+    if not device_port:
+        return
+    if _record_device_progress_fn is None:
+        try:
+            from monst.image.device_management import record_device_progress as _record_device_progress_fn  # type: ignore
+        except Exception:
+            return
+    try:
+        _record_device_progress_fn(device_port)  # type: ignore[misc]
+    except Exception:
+        pass
+
 # ---------------------------------------------------------------------------
 # Internal state management (thread-safe)
 # ---------------------------------------------------------------------------
@@ -424,6 +445,7 @@ def perform_action_enhanced(
                 
                 success = (res1 is not None) and (res2 is not None)
                 if success:
+                    _mark_progress(device_port)
                     logger.info(f"[ADB-DEBUG] 強化クリック成功 デバイス={device_port} 座標=({x}, {y}) 試行={attempt+1}")
                     return True
                 else:
@@ -435,6 +457,7 @@ def perform_action_enhanced(
                     device_port
                 )
                 if res is not None:
+                    _mark_progress(device_port)
                     logger.debug(f"[ULTRATHINK] 強化スワイプ成功 ({x},{y}→{x2},{y2}, 試行: {attempt+1})")
                     return True
             else:
@@ -489,13 +512,19 @@ def perform_action(
                 ["shell", "input", "swipe", str(x), str(y), str(x), str(y), str(duration)],
                 device_port
             )
-            return res is not None
+            if res is not None:
+                _mark_progress(device_port)
+                return True
+            return False
         if action == "swipe" and x2 is not None and y2 is not None:
             res = run_adb_command(
                 ["shell", "input", "swipe", str(x), str(y), str(x2), str(y2), str(duration)],
                 device_port
             )
-            return res is not None
+            if res is not None:
+                _mark_progress(device_port)
+                return True
+            return False
         logger.error("perform_action: invalid parameters (%s)", action)
         return False
     except Exception as exc:

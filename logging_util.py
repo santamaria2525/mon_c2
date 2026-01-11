@@ -394,6 +394,7 @@ class MultiDeviceLogger:
     def log_success(self, device_port: str) -> None:
         with self._lock:
             self._results[device_port] = True
+            self._errors.pop(device_port, None)
 
     def log_error(self, device_port: str, message: str) -> None:
         with self._lock:

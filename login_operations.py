@@ -44,6 +44,7 @@ def device_operation_login(
         bool: 成功時True、失敗時False
     """
     terminal_num = get_terminal_number(device_port)
+    start_time = time.time()
     
     try:
         
@@ -56,19 +57,30 @@ def device_operation_login(
             max_attempts = min(getattr(config, 'LOGIN_MAX_ATTEMPTS', 30), 50)  # 上限50回
             base_sleep = max(getattr(config, 'login_sleep', 5), 2)  # 最低2秒
             
+            # 10分ごとの再送に合わせてタイムアウトを設定
+            max_total_seconds = getattr(config, 'login_operation_timeout_seconds', 600)
+            max_total_seconds = max(120, min(int(max_total_seconds), 3600))
+
             # 成功時はデバッグログ（最初の端末のみ）
             if terminal_num == "端末1":
                 logger.info(f"設定読み込み成功: LOGIN_MAX_ATTEMPTS={max_attempts}, login_sleep={base_sleep}")
+                logger.info(f"ログイン処理タイムアウト: {max_total_seconds}秒")
                 
         except Exception as e:
             # 設定読み込み失敗時のフォールバック
             max_attempts = 30
             base_sleep = 2
+            max_total_seconds = 600
             logger.warning(f"{terminal_num}: 設定読み込み失敗、デフォルト値使用 - エラー詳細: {type(e).__name__}: {e}")
         
         # メインログインループ
         for attempt in range(max_attempts):
             try:
+                # 全体タイムアウト判定
+                if time.time() - start_time > max_total_seconds:
+                    logger.warning(f"{terminal_num}: ログイン処理が{max_total_seconds}秒を超過したため再送対象")
+                    return False
+
                 # 動的待機時間（指数バックオフ）
                 if attempt > 0:
                     # 軽めの指数バックオフでレスポンス向上（上限12秒）
@@ -99,11 +111,11 @@ def device_operation_login(
                 # 3. エラー画面チェック
                 if _check_error_screen(device_port):
                     message = f"{terminal_num}: フォルダ{folder}でログイン不可画面(zz_lost)を検出"
-                    logger.info(message)
+                    logger.warning(message)
                     if multi_logger:
-                        multi_logger.log_success(device_port)
-                        multi_logger.update_task_status(device_port, folder, 'zz_lost検出')
-                    return True
+                        multi_logger.log_error(device_port, f"フォルダ{folder}: ログイン失敗 (zz_lost)")
+                        multi_logger.update_task_status(device_port, folder, 'ログイン失敗')
+                    return False
                 
                 # 4. 各種ボタン処理（最重要）
                 if _handle_all_buttons(device_port):

@@ -12,6 +12,7 @@ from __future__ import annotations
 import ctypes
 import ctypes.wintypes
 import time
+from collections import deque
 from typing import Any, List, Optional, Tuple, Sequence
 import threading
 
@@ -157,6 +158,10 @@ def close_adb_error_dialogs() -> int:
     """Close adb.exe application error dialogs shown by Windows."""
     windows = _collect_windows(include_hidden=True)
     closed = 0
+    now = time.time()
+    if not hasattr(close_adb_error_dialogs, "_recent"):
+        close_adb_error_dialogs._recent = deque()  # type: ignore[attr-defined]
+        close_adb_error_dialogs._last_recovery = 0.0  # type: ignore[attr-defined]
 
     for window in windows:
         try:
@@ -179,6 +184,20 @@ def close_adb_error_dialogs() -> int:
 
     if closed:
         logger.info("ADB エラーダイアログを %d 件閉じました", closed)
+        recent = close_adb_error_dialogs._recent  # type: ignore[attr-defined]
+        recent.append(now)
+        while recent and now - recent[0] > 60.0:
+            recent.popleft()
+        if len(recent) >= 5:
+            last_recovery = close_adb_error_dialogs._last_recovery  # type: ignore[attr-defined]
+            if now - last_recovery > 120.0:
+                close_adb_error_dialogs._last_recovery = now  # type: ignore[attr-defined]
+                try:
+                    from adb_utils import reset_adb_server
+                    logger.warning("ADB エラーダイアログが連続発生したため ADB を再起動します")
+                    reset_adb_server(force=True)
+                except Exception as exc:
+                    logger.debug("ADB reset from dialog monitor failed: %s", exc)
 
     return closed
 

@@ -13,6 +13,7 @@ from logging_util import logger, MultiDeviceLogger
 from login_operations import device_operation_login
 from monst.adb import perform_action, send_key_event
 from monst.image import tap_if_found, tap_until_found, tap_if_found_on_windows, tap_until_found_on_windows
+from functools import partial
 from monst.image.device_management import set_host_wait_mode, record_device_progress
 from utils.watchdog import touch_watchdog
 from utils import send_notification_email, replace_multiple_lines_in_file, activate_window_and_right_click
@@ -804,3 +805,5 @@ def load_macro(number: int) -> None:
 
         # ウィンドウをアクティブにして右クリック
         activate_window_and_right_click(window_name)
+tap_if_found_on_windows = partial(tap_if_found_on_windows, log=False)
+tap_until_found_on_windows = partial(tap_until_found_on_windows, log=False)

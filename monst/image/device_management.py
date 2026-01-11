@@ -16,7 +16,7 @@ import time
 from collections import defaultdict
 from typing import Dict, List, Set, Any, Sequence, Optional
 
-from config import NOX_ADB_PATH
+from config import NOX_ADB_PATH, get_config_value
 from logging_util import logger
 from monst.adb import (
     reset_adb_server, 
@@ -64,10 +64,13 @@ RECOVERY_RESET_INTERVAL = 900  # 回復試行カウントのリセット間隔�
 
 _progress_lock = threading.Lock()
 _last_progress_time: Dict[str, float] = {}
-_FREEZE_THRESHOLD = 600.0  # 10分
-_FREEZE_CHECK_INTERVAL = 60.0
-_GLOBAL_STALL_RESET_COOLDOWN = 900.0
+_FREEZE_THRESHOLD = float(get_config_value("freeze_monitor_threshold_seconds", 600) or 600)
+_FREEZE_CHECK_INTERVAL = float(get_config_value("freeze_monitor_check_interval_seconds", 60) or 60)
+_GLOBAL_STALL_RESET_COOLDOWN = float(get_config_value("freeze_monitor_global_reset_cooldown_seconds", 900) or 900)
 _last_global_stall_reset = 0.0
+_BLACK_SCREEN_MEAN_THRESHOLD = float(get_config_value("black_screen_mean_threshold", 5) or 5)
+_BLACK_SCREEN_RESTART_SECONDS = float(get_config_value("black_screen_restart_seconds", 180) or 180)
+_black_screen_since: Dict[str, float] = {}
 _host_wait_ports: Set[str] = set()
 _host_wait_lock = threading.Lock()
 _last_virtual_machine_failure = 0.0
@@ -108,6 +111,25 @@ def is_auto_restart_paused() -> bool:
 def get_auto_restart_pause_reason() -> Optional[str]:
     with _auto_restart_pause_lock:
         return _auto_restart_pause_reason
+
+def note_black_screen(device_port: str, screen_mean: float) -> None:
+    """Track black-screen duration and restart if it persists."""
+    if screen_mean <= _BLACK_SCREEN_MEAN_THRESHOLD:
+        now = time.time()
+        since = _black_screen_since.get(device_port)
+        if since is None:
+            _black_screen_since[device_port] = now
+            return
+        if now - since >= _BLACK_SCREEN_RESTART_SECONDS:
+            logger.warning(
+                "%s: black screen detected for %.0fs; restarting",
+                device_port,
+                now - since,
+            )
+            _queue_device_restart(device_port, restart_type="black_screen")
+            _black_screen_since[device_port] = now
+    else:
+        _black_screen_since.pop(device_port, None)
 
 def _reset_recovery_attempts_if_expired(device_port: str, current_time: float) -> None:
     """時間経過により回復試行回数をリセットします。
@@ -287,6 +309,15 @@ def record_device_progress(device_port: str) -> None:
     """端末で進捗が確認できたタイミングを記録する。"""
     with _progress_lock:
         _last_progress_time[device_port] = time.time()
+
+
+def get_device_idle_time(device_port: str) -> float:
+    """直近の進捗からの経過秒数を返す。進捗が無い場合は無限大扱い。"""
+    with _progress_lock:
+        last_seen = _last_progress_time.get(device_port)
+    if last_seen is None:
+        return float("inf")
+    return time.time() - last_seen
 
 def have_devices_been_idle(device_ports: Sequence[str], idle_threshold: float) -> bool:
     """すべての端末が指定秒数以上進捗していないかを判定する。"""
@@ -632,29 +663,20 @@ def _staged_nox_restart() -> None:
             ("127.0.0.1:62032", 8),
         ]
         
-        # 2つずつ段階的に起動
-        for i in range(0, len(priority_devices), 2):
-            batch = priority_devices[i:i+2]
-            
-            logger.critical(f"● バッチ {i//2 + 1}: {len(batch)}台のNOXを起動")
-            
-            # 並行して起動
-            threads = []
-            for device_port, instance_number in batch:
-                thread = threading.Thread(
-                    target=_restart_single_nox_safely,
-                    args=(device_port, instance_number),
-                    daemon=True
-                )
-                threads.append(thread)
-                thread.start()
-            
-            # 起動完了を待機
-            for thread in threads:
-                thread.join(timeout=180)  # 3分でタイムアウト
-            
-            # 次のバッチまで待機
-            time.sleep(30)
+        # 一括起動（最大8台）
+        threads = []
+        logger.critical(f"● NOX全台一括起動 ({len(priority_devices)}台)")
+        for device_port, instance_number in priority_devices:
+            thread = threading.Thread(
+                target=_restart_single_nox_safely,
+                args=(device_port, instance_number),
+                daemon=True
+            )
+            threads.append(thread)
+            thread.start()
+
+        for thread in threads:
+            thread.join(timeout=300)
         
         logger.critical("🔄 NOX再起動完了")
         
@@ -1035,6 +1057,14 @@ def notify_virtual_machine_failure() -> None:
     """NOX仮想マシン起動失敗を検知した際に呼び出し、全体リセットを実行する。"""
     global _last_virtual_machine_failure
     now = time.time()
+    try:
+        cfg = get_config()
+        enabled = bool(cfg.extra.get("enable_global_nox_reset_on_vm_fail", False))
+    except Exception:
+        enabled = False
+    if not enabled:
+        logger.warning("NOX仮想マシン起動失敗を検知。全NOXリセットは無効化されています。")
+        return
     if _is_any_host_waiting():
         logger.warning("覇者ホスト待機中のため仮想マシン失敗リセットをスキップ")
         return

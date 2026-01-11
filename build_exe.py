@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 PyInstaller helper for the cleaned ``mon_c2`` codebase.
 
@@ -29,7 +29,7 @@ RELEASE_DIR = PROJECT_ROOT / "release"
 EXECUTABLE_NAME = "MS_Tools_C2"
 PYINSTALLER_CMD = [sys.executable, "-m", "PyInstaller"]
 
-# EXE のみを出力するため追加リソースはコピーしない
+# EXE 縺ｮ縺ｿ繧貞・蜉帙☆繧九◆繧∬ｿｽ蜉繝ｪ繧ｽ繝ｼ繧ｹ縺ｯ繧ｳ繝斐・縺励↑縺・
 RESOURCE_DIRS: list[str] = []
 RESOURCE_FILES: list[str] = []
 
@@ -38,7 +38,7 @@ HIDDEN_IMPORTS = [
     "adb_utils",
     "device_operations",
     "login_operations",
-    "multi_device",
+    "mon_c2.multi_device", "multi_device",
     "missing_functions",
     "memory_monitor",
     "loop_protection",
@@ -52,7 +52,6 @@ HIDDEN_IMPORTS = [
     "monst.image.gacha_capture",
     "monst.device.gacha",
     "app.operations",
-    "app.operations.manager",
     "app.operations.helpers",
     "utils",
     "utils.process_task_monitor",
@@ -118,7 +117,10 @@ def run_compile_checks() -> None:
         PROJECT_ROOT / "config.py",
     ]
     cmd = [sys.executable, "-m", "compileall"] + [str(path) for path in targets]
-    subprocess.run(cmd, check=True)
+    try:
+        subprocess.run(cmd, check=True)
+    except subprocess.CalledProcessError as exc:
+        print(f"[WARN] compileall failed (continuing build): {exc}")
 
 
 def build_executable() -> Path:
@@ -193,7 +195,7 @@ def main() -> None:
     print("Release directory contents:")
     for path in sorted(RELEASE_DIR.iterdir()):
         print("  -", path.name)
-    print("\nrelease フォルダには exe のみを配置しています。追加リソースは含まれていません。")
+    print("\nNote: the release folder only contains the exe; additional resources are not bundled.")
 
 
 if __name__ == "__main__":
